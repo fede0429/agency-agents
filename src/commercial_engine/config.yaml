@@ -1,0 +1,120 @@
+web:
+  host: 0.0.0.0
+  port: 8000
+  cors_origins:
+  - '*'
+  upload_dir: /app/data/uploads
+  video_dir: /app/data/videos
+database:
+  url: ${DATABASE_URL}
+auth:
+  jwt_secret: ${JWT_SECRET}
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 7
+  admin_email: ${ADMIN_EMAIL:-admin@ugcvideo.pro}
+  admin_password: ${ADMIN_PASSWORD:-changeme123}
+kie:
+  api_key: ${KIE_API_KEY}
+  callback_url: ''
+  poll_interval: 15
+  max_poll_retries: 120
+models:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+  google:
+    api_key: ${GOOGLE_API_KEY}
+  seedance:
+    api_key: ${SEEDANCE_API_KEY}
+    base_url: https://api.seedance.ai/v1
+gemini:
+  api_key: ${GOOGLE_API_KEY}
+  model: gemini-2.5-flash
+  fallback_model: gemini-2.0-flash
+  use_kie: true
+tts:
+  model: quality
+  voices:
+    it:
+      voice_id: pNInz6obpgDQGcFmaJgB
+      name: Italian Female
+    zh:
+      voice_id: ThT5KcBeYPX3keUQqHPh
+      name: Chinese Female
+    en:
+      voice_id: 21m00Tcm4TlvDq8ikWAM
+      name: English Female (Rachel)
+lipsync:
+  model: kling_avatar_720p
+google_drive:
+  credentials_path: credentials.json
+  folder_name: UGC_Videos
+  make_public: true
+video:
+  output_dir: /tmp/ugc_videos
+  default_size: 720x1280
+  default_aspect_ratio: '9:16'
+  transition_type: crossfade
+  transition_duration: 0.3
+  video_codec: libx264
+  audio_codec: aac
+  crf: 23
+  preset: fast
+polling:
+  sora_interval: 60
+  veo_interval: 45
+  seedance_interval: 30
+  max_retries: 30
+  backoff_factor: 1.5
+frame_chaining:
+  extract_offset: 0.1
+  frame_quality: 95
+  add_continuation_prefix: true
+  continuation_prefix: 'Seamlessly continuing from the previous frame: '
+url_extraction:
+  timeout: 30
+  max_length: 8000
+  user_agent: Mozilla/5.0 (compatible; UGCVideoPro/2.1)
+defaults:
+  model: veo_31_fast
+  duration: 15
+  language: it
+  available_models:
+  - key: veo_31_fast
+    name: Veo 3.1 Fast
+    description: Google Veo 3.1 — best frame chaining, fast
+    price: $0.30/video
+  - key: veo_31_quality
+    name: Veo 3.1 Quality
+    description: Google Veo 3.1 — highest quality
+    price: $1.25/video
+  - key: seedance_15
+    name: Seedance 1.5 Pro
+    description: ByteDance — strong reference lock
+    price: $0.08/10s
+  - key: seedance_2
+    name: Seedance 2.0 (Coming Soon)
+    description: ByteDance — animation drama ready
+    price: TBD
+  - key: sora_2
+    name: Sora 2
+    description: OpenAI — stable generation
+    price: $0.175/10s
+  - key: runway
+    name: Runway
+    description: Runway — fast & affordable
+    price: $0.06/5s
+  - key: kling_30
+    name: Kling 3.0
+    description: Kling — with built-in audio
+    price: $0.20/s (1080p)
+  - key: hailuo
+    name: Hailuo 2.3
+    description: MiniMax — high fidelity
+    price: $0.15/6s
+log_level: ${LOG_LEVEL:-INFO}
+log_file: ''
+director:
+  enabled: true
+  model: gemini-3-pro
+  fallback_model: gemini-3-flash
+  max_planning_retries: 2
