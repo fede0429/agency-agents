@@ -49,7 +49,19 @@ class AutoremakePipeline:
             )
             
             rewrite_json_str = await self.client.process_task(coach_profile, rewrite_prompt, response_format=True)
-            rewritten_data = json.loads(rewrite_json_str)
+            
+            # Sanitize: strip markdown code fences if LLM wraps JSON
+            import re
+            cleaned = re.sub(r'^```(?:json)?\s*', '', rewrite_json_str.strip())
+            cleaned = re.sub(r'\s*```$', '', cleaned)
+            
+            try:
+                rewritten_data = json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                print(f"[Error] LLM returned invalid JSON. Parse error: {e}")
+                print(f"[Debug] Raw LLM output (first 500 chars): {rewrite_json_str[:500]}")
+                return None
+            
             print("-> Rewrite success! Originality injected.")
             
             # Step 3: Dispatch to VideoOrchestrator

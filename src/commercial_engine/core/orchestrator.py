@@ -119,15 +119,15 @@ class VideoOrchestrator:
         self.publishers = []
         publisher_config = config.get("publisher", {})
         if publisher_config.get("enable_tiktok"):
-            self.publishers.append(TikTokPublisher())
+            self.publishers.append(TikTokPublisher(config))
         if publisher_config.get("enable_youtube_shorts"):
-            self.publishers.append(YouTubeShortsPublisher())
+            self.publishers.append(YouTubeShortsPublisher(config))
         if publisher_config.get("enable_douyin"):
-            self.publishers.append(DouyinPublisher())
+            self.publishers.append(DouyinPublisher(config))
         if publisher_config.get("enable_instagram_reels"):
-            self.publishers.append(InstagramReelsPublisher())
+            self.publishers.append(InstagramReelsPublisher(config))
 
-        # Viral Copywriter Agent
+        # Viral Copywriter Agent (independent of publishers)
         viral_config = config.get("viral_copywriter", {})
         if viral_config.get("enabled", True):
             self.viral_copywriter = ViralCopywriter(config)
@@ -334,16 +334,7 @@ class VideoOrchestrator:
             else:
                 raise RuntimeError(f"Video stitching failed: {e}") from e
 
-        # [NEW] Add Background Music here
-        if getattr(self, "bgm_matcher", None):
-            await update_status("adding_bgm")
-            try:
-                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
-                final_path = await self.bgm_matcher.add_bgm(final_path, context)
-            except Exception as e:
-                logger.warning(f"BGM Matcher failed, skipping BGM: {e}")
-
-        # TTS generation (multi-language, parallel)
+        # TTS generation (multi-language, parallel) — must happen BEFORE BGM
         tts_paths = {}
         if plan.tts_languages:
             await update_status("generating_tts")
@@ -352,6 +343,15 @@ class VideoOrchestrator:
                 languages=plan.tts_languages,
                 config=self.config,
             )
+
+        # Add Background Music AFTER TTS (so BGM mixes with voice-over audio)
+        if self.bgm_matcher:
+            await update_status("adding_bgm")
+            try:
+                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
+                final_path = await self.bgm_matcher.add_bgm(final_path, context)
+            except Exception as e:
+                logger.warning(f"BGM Matcher failed, skipping BGM: {e}")
 
         # Upload to Google Drive
         drive_link = None
@@ -368,35 +368,39 @@ class VideoOrchestrator:
                 logger.warning(f"Drive upload failed: {e}")
                 await update_status("error_drive_upload")
 
-        # Viral Copywriting & Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        # Viral Copywriting (independent of publishers)
         metadata = {
             "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
             "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
             "tags": ["ai", "generated", request.mode]
         }
-        if getattr(self, "viral_copywriter", None) and self.publishers:
+        if self.viral_copywriter:
             await update_status("generating_viral_copy")
             try:
-                # Use raw_json or text_prompt as context
                 context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
-                viral_data = await self.viral_copywriter.generate_content(context)
+                # Truncate context to avoid token waste
+                viral_data = await self.viral_copywriter.generate_content(context[:1500])
+                tags = viral_data.get("tags", metadata["tags"])
+                if not isinstance(tags, list):
+                    tags = [t.strip() for t in str(tags).split(",")]
                 metadata.update({
                     "title": viral_data.get("title", metadata["title"]),
                     "description": viral_data.get("description", metadata["description"]),
-                    "tags": viral_data.get("tags", metadata["tags"])
+                    "tags": tags
                 })
                 logger.info(f"[ViralCopy] Generated Title: {metadata['title']}")
             except Exception as e:
                 logger.warning(f"Viral copy generation failed, using defaults: {e}")
 
+        # Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
                 await update_status(f"publishing_{pub_name.lower()}")
-                res = publisher.publish(final_path, metadata)
+                res = await publisher.publish(final_path, metadata)
                 logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
-                if 'error' in res.get('response', {}):
-                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('response').get('error')}")
+                if res.get("error"):
+                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('error')}")
             except Exception as e:
                 logger.error(f"Publishing component failed: {e}")
 
@@ -557,8 +561,8 @@ class VideoOrchestrator:
             else:
                 raise RuntimeError(f"Video stitching failed: {e}") from e
 
-        # [NEW] Add Background Music here
-        if getattr(self, "bgm_matcher", None):
+        # Add Background Music
+        if self.bgm_matcher:
             await update_status("adding_bgm")
             try:
                 context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
@@ -580,34 +584,38 @@ class VideoOrchestrator:
                 logger.warning(f"Google Drive upload failed: {e} — video will be sent directly")
                 await update_status("error_drive_upload")
 
-        # Step 8: Viral Copywriting & Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        # Step 8: Viral Copywriting (independent of publishers)
         metadata = {
             "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
             "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
             "tags": ["ai", "generated", request.mode]
         }
-        if getattr(self, "viral_copywriter", None) and self.publishers:
+        if self.viral_copywriter:
             await update_status("generating_viral_copy")
             try:
                 context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
-                viral_data = await self.viral_copywriter.generate_content(context)
+                viral_data = await self.viral_copywriter.generate_content(context[:1500])
+                tags = viral_data.get("tags", metadata["tags"])
+                if not isinstance(tags, list):
+                    tags = [t.strip() for t in str(tags).split(",")]
                 metadata.update({
                     "title": viral_data.get("title", metadata["title"]),
                     "description": viral_data.get("description", metadata["description"]),
-                    "tags": viral_data.get("tags", metadata["tags"])
+                    "tags": tags
                 })
                 logger.info(f"[ViralCopy] Generated Title: {metadata['title']}")
             except Exception as e:
                 logger.warning(f"Viral copy generation failed, using defaults: {e}")
 
+        # Step 9: Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
                 await update_status(f"publishing_{pub_name.lower()}")
-                res = publisher.publish(final_path, metadata)
+                res = await publisher.publish(final_path, metadata)
                 logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
-                if 'error' in res.get('response', {}):
-                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('response').get('error')}")
+                if res.get("error"):
+                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('error')}")
             except Exception as e:
                 logger.error(f"Publishing component failed: {e}")
 

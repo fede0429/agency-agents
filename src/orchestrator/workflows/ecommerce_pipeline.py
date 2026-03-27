@@ -6,6 +6,7 @@ from agency_adapter import AgencyPromptLoader, AgencyLLMClient
 
 class EcommercePipeline:
     def __init__(self, repo_root: str):
+        self.repo_root = Path(repo_root)
         self.loader = AgencyPromptLoader(repo_root)
         self.client = AgencyLLMClient()
         
