@@ -38,6 +38,7 @@ from models import get_model_adapter
 from services.google_drive import GoogleDriveUploader
 from services.image_analyzer import ImageAnalyzer
 from services.url_extractor import URLExtractor
+from services.publisher import TikTokPublisher, YouTubeShortsPublisher, DouyinPublisher, InstagramReelsPublisher
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -111,6 +112,18 @@ class VideoOrchestrator:
             self.drive_uploader = GoogleDriveUploader(config)
         else:
             self.drive_uploader = None
+
+        # Social Media Publishers
+        self.publishers = []
+        publisher_config = config.get("publisher", {})
+        if publisher_config.get("enable_tiktok"):
+            self.publishers.append(TikTokPublisher())
+        if publisher_config.get("enable_youtube_shorts"):
+            self.publishers.append(YouTubeShortsPublisher())
+        if publisher_config.get("enable_douyin"):
+            self.publishers.append(DouyinPublisher())
+        if publisher_config.get("enable_instagram_reels"):
+            self.publishers.append(InstagramReelsPublisher())
 
         # Director Agent (new in v3.0)
         self._director = None
@@ -330,6 +343,23 @@ class VideoOrchestrator:
                 logger.warning(f"Drive upload failed: {e}")
                 await update_status("error_drive_upload")
 
+        # Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        metadata = {
+            "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
+            "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
+            "tags": ["ai", "generated", request.mode]
+        }
+        for publisher in self.publishers:
+            try:
+                pub_name = publisher.__class__.__name__.replace("Publisher", "")
+                await update_status(f"publishing_{pub_name.lower()}")
+                res = publisher.publish(final_path, metadata)
+                logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
+                if 'error' in res.get('response', {}):
+                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('response').get('error')}")
+            except Exception as e:
+                logger.error(f"Publishing component failed: {e}")
+
         # Cleanup individual clips
         if len(segment_paths) > 1:
             for path in segment_paths:
@@ -500,6 +530,23 @@ class VideoOrchestrator:
             except Exception as e:
                 logger.warning(f"Google Drive upload failed: {e} — video will be sent directly")
                 await update_status("error_drive_upload")
+
+        # Step 8: Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        metadata = {
+            "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
+            "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
+            "tags": ["ai", "generated", request.mode]
+        }
+        for publisher in self.publishers:
+            try:
+                pub_name = publisher.__class__.__name__.replace("Publisher", "")
+                await update_status(f"publishing_{pub_name.lower()}")
+                res = publisher.publish(final_path, metadata)
+                logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
+                if 'error' in res.get('response', {}):
+                    logger.error(f"Error publishing to {res.get('platform')}: {res.get('response').get('error')}")
+            except Exception as e:
+                logger.error(f"Publishing component failed: {e}")
 
         # Cleanup individual clips
         if len(segment_paths) > 1:
