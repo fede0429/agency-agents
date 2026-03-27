@@ -39,6 +39,7 @@ from services.google_drive import GoogleDriveUploader
 from services.image_analyzer import ImageAnalyzer
 from services.url_extractor import URLExtractor
 from services.publisher import TikTokPublisher, YouTubeShortsPublisher, DouyinPublisher, InstagramReelsPublisher
+from services.viral_copywriter import ViralCopywriter
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -124,6 +125,13 @@ class VideoOrchestrator:
             self.publishers.append(DouyinPublisher())
         if publisher_config.get("enable_instagram_reels"):
             self.publishers.append(InstagramReelsPublisher())
+
+        # Viral Copywriter Agent
+        viral_config = config.get("viral_copywriter", {})
+        if viral_config.get("enabled", True):
+            self.viral_copywriter = ViralCopywriter(config)
+        else:
+            self.viral_copywriter = None
 
         # Director Agent (new in v3.0)
         self._director = None
@@ -343,12 +351,27 @@ class VideoOrchestrator:
                 logger.warning(f"Drive upload failed: {e}")
                 await update_status("error_drive_upload")
 
-        # Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        # Viral Copywriting & Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
         metadata = {
             "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
             "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
             "tags": ["ai", "generated", request.mode]
         }
+        if getattr(self, "viral_copywriter", None) and self.publishers:
+            await update_status("generating_viral_copy")
+            try:
+                # Use raw_json or text_prompt as context
+                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
+                viral_data = await self.viral_copywriter.generate_content(context)
+                metadata.update({
+                    "title": viral_data.get("title", metadata["title"]),
+                    "description": viral_data.get("description", metadata["description"]),
+                    "tags": viral_data.get("tags", metadata["tags"])
+                })
+                logger.info(f"[ViralCopy] Generated Title: {metadata['title']}")
+            except Exception as e:
+                logger.warning(f"Viral copy generation failed, using defaults: {e}")
+
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
@@ -531,12 +554,26 @@ class VideoOrchestrator:
                 logger.warning(f"Google Drive upload failed: {e} — video will be sent directly")
                 await update_status("error_drive_upload")
 
-        # Step 8: Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        # Step 8: Viral Copywriting & Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
         metadata = {
             "title": getattr(request, 'text_prompt', 'AI Generated Video')[:50],
             "description": script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt),
             "tags": ["ai", "generated", request.mode]
         }
+        if getattr(self, "viral_copywriter", None) and self.publishers:
+            await update_status("generating_viral_copy")
+            try:
+                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
+                viral_data = await self.viral_copywriter.generate_content(context)
+                metadata.update({
+                    "title": viral_data.get("title", metadata["title"]),
+                    "description": viral_data.get("description", metadata["description"]),
+                    "tags": viral_data.get("tags", metadata["tags"])
+                })
+                logger.info(f"[ViralCopy] Generated Title: {metadata['title']}")
+            except Exception as e:
+                logger.warning(f"Viral copy generation failed, using defaults: {e}")
+
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
