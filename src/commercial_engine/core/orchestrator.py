@@ -42,6 +42,8 @@ from services.publisher import TikTokPublisher, YouTubeShortsPublisher, DouyinPu
 from services.viral_copywriter import ViralCopywriter
 from services.bgm_matcher import AIBGMMatcher
 from services.video_intelligence import VideoIntelligenceExtractor
+from services.video_model_registry import VideoModelRegistry
+from services.storyboard_agent import StoryboardAgent
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -78,11 +80,16 @@ class VideoResult:
     segment_paths: list[str] = field(default_factory=list)
     script_json: str = ""
     product_analysis: dict = field(default_factory=dict)
-    # NEW: Director Agent metadata
+    # Director Agent metadata
     director_decisions: list[str] = field(default_factory=list)
     production_plan_json: str = ""
     estimated_cost_usd: float = 0.0
     tts_paths: dict = field(default_factory=dict)
+    # Publishing results
+    publish_results: list[dict] = field(default_factory=list)
+    viral_metadata: dict = field(default_factory=dict)
+    # Storyboard data
+    storyboard: dict = field(default_factory=dict)
 
 
 class VideoOrchestrator:
@@ -142,6 +149,16 @@ class VideoOrchestrator:
             self.bgm_matcher = AIBGMMatcher(config)
         else:
             self.bgm_matcher = None
+
+        # Multi-Model Video Registry (Volcengine, Kling, Wan, etc.)
+        self.video_registry = VideoModelRegistry(config)
+
+        # AI Storyboard Agent (Segment → Shot pipeline)
+        storyboard_config = config.get("storyboard", {})
+        if storyboard_config.get("enabled", False):
+            self.storyboard_agent = StoryboardAgent(config)
+        else:
+            self.storyboard_agent = None
 
         # Director Agent (new in v3.0)
         self._director = None
@@ -235,12 +252,20 @@ class VideoOrchestrator:
         if request.text_prompt:
             product_analysis["user_description"] = request.text_prompt
 
-        # Pre-extract URL content for Director's context
+        # Pre-extract URL content for Director's context (with deep video intelligence)
         url_content = request.url_content
         if request.url and not url_content:
             await update_status("extracting_url")
             try:
-                url_content = await self.url_extractor.extract(request.url)
+                platform = VideoIntelligenceExtractor._detect_platform(request.url)
+                if platform != "unknown":
+                    logger.info(f"[Director] Detected video platform: {platform}. Using deep extraction...")
+                    await update_status("deep_video_analysis")
+                    intel_report = await self.video_intel.analyze(request.url)
+                    url_content = intel_report.to_prompt_context()
+                    logger.info(f"[Director] Deep extraction: {len(intel_report.transcript)} chars transcript")
+                else:
+                    url_content = await self.url_extractor.extract(request.url)
             except Exception as e:
                 logger.warning(f"URL extraction failed: {e}")
 
@@ -395,16 +420,19 @@ class VideoOrchestrator:
                 logger.warning(f"Viral copy generation failed, using defaults: {e}")
 
         # Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        publish_results = []
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
                 await update_status(f"publishing_{pub_name.lower()}")
                 res = await publisher.publish(final_path, metadata)
+                publish_results.append(res)
                 logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
                 if res.get("error"):
                     logger.error(f"Error publishing to {res.get('platform')}: {res.get('error')}")
             except Exception as e:
                 logger.error(f"Publishing component failed: {e}")
+                publish_results.append({"status": "failed", "error": str(e)})
 
         # Cleanup individual clips
         if len(segment_paths) > 1:
@@ -437,6 +465,8 @@ class VideoOrchestrator:
             production_plan_json=plan.raw_json,
             estimated_cost_usd=plan.estimated_cost_usd,
             tts_paths=tts_paths,
+            publish_results=publish_results,
+            viral_metadata=metadata,
         )
 
     # ══════════════════════════════════════════════════════════
@@ -620,16 +650,19 @@ class VideoOrchestrator:
                 logger.warning(f"Viral copy generation failed, using defaults: {e}")
 
         # Step 9: Multi-Platform Publishing (TikTok, YouTube, Douyin, IG)
+        publish_results = []
         for publisher in self.publishers:
             try:
                 pub_name = publisher.__class__.__name__.replace("Publisher", "")
                 await update_status(f"publishing_{pub_name.lower()}")
                 res = await publisher.publish(final_path, metadata)
+                publish_results.append(res)
                 logger.info(f"Published to {res.get('platform', 'unknown')}: {res.get('status', 'unknown')}")
                 if res.get("error"):
                     logger.error(f"Error publishing to {res.get('platform')}: {res.get('error')}")
             except Exception as e:
                 logger.error(f"Publishing component failed: {e}")
+                publish_results.append({"status": "failed", "error": str(e)})
 
         # Cleanup individual clips
         if len(segment_paths) > 1:
@@ -657,6 +690,8 @@ class VideoOrchestrator:
             segment_paths=segment_paths,
             script_json=script.raw_json,
             product_analysis=product_analysis,
+            publish_results=publish_results,
+            viral_metadata=metadata,
         )
 
 

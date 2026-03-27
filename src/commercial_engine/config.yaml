@@ -118,3 +118,43 @@ director:
   model: gemini-3-pro
   fallback_model: gemini-3-flash
   max_planning_retries: 2
+
+# ═════ New Module Configurations ═════
+
+bgm_matcher:
+  enabled: true
+  model: gpt-4o-mini
+  bgm_dir: assets/music
+  default_volume: 0.12      # 0.0-1.0, BGM volume during speech
+  duck_volume: 0.06         # Volume when speech is detected (sidechain)
+
+viral_copywriter:
+  enabled: true
+  model: gpt-4o-mini
+
+video_intelligence:
+  work_dir: /tmp/video_intel
+  whisper_model: whisper-1
+  max_keyframes: 5
+  cleanup_after: true
+
+storyboard:
+  enabled: false             # Enable for short-drama storyboard pipeline
+  model: gpt-4o-mini
+
+video_models:
+  volcengine:
+    api_key: ${VOLCENGINE_API_KEY:-}
+    base_url: https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks
+  kling:
+    api_key: ${KLING_API_KEY:-}
+    base_url: ""             # Uses default Kling API endpoints
+  wan:
+    api_key: ${WAN_API_KEY:-}
+    base_url: ""             # Uses default DashScope endpoints
+
+publisher:
+  enable_tiktok: false
+  enable_youtube_shorts: false
+  enable_douyin: false
+  enable_instagram_reels: false
