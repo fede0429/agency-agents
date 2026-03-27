@@ -539,11 +539,13 @@ def get_system_status() -> dict:
 
 def get_registered_models() -> list[str]:
     """Return the list of video generation models available in config."""
-    from core.model_router import MODEL_REGISTRY
     try:
+        from core.model_router import MODEL_REGISTRY
         return list(MODEL_REGISTRY.keys())
-    except Exception:
-        return ["veo_31_fast", "veo_31_quality", "seedance_15", "sora_2"]
+    except Exception as e:
+        import logging
+        logging.error(f"[HealthCheck] Failed to load MODEL_REGISTRY: {e}")
+        return []
 
 
 def get_pipeline_availability() -> dict:
@@ -620,9 +622,17 @@ async def process_video_with_subtitles(
 
     if subtitle_paths:
         # Burn subtitles into video via FFmpeg
-        import shlex
+        # Replace shlex.quote with robust Windows-compatible filter escaping
+        def escape_ffmpeg_path(p: str) -> str:
+            # 1. Convert backslashes to forward slashes
+            p = p.replace('\\', '/')
+            # 2. Escape drive colons for FFmpeg filter graph (e.g. C: -> C\:)
+            p = p.replace(':', '\\\\:')
+            # 3. Surround with escaped single quotes to handle spaces
+            return f"\\'{p}\\'"
+
         sub_filter = ",".join(
-            [f"subtitles={shlex.quote(sp)}" for sp in subtitle_paths]
+            [f"subtitles={escape_ffmpeg_path(sp)}" for sp in subtitle_paths]
         )
         cmd = [
             "ffmpeg", "-y", "-i", video_path,
@@ -630,6 +640,11 @@ async def process_video_with_subtitles(
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "copy", output_path,
         ]
+        
+        # Ensure utf-8 decoding on ffmpeg output
+        import os
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        
         success, _, stderr = await ffmpeg.run_command(cmd, timeout=300)
         if not success:
             logging.error(f"FFmpeg subtitle burn failed: {stderr[:300]}")

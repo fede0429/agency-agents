@@ -1,363 +1,271 @@
 # Engineering Pipeline Output
 
 ## Feature Request
-Add multi-language subtitle auto-embedding to the UGC video engine: parse TTS output per language, generate SRT/ASS subtitle files with timestamps, and burn subtitles into the final stitched video via FFmpeg overlay in core/video_stitcher.py
+Add a robust file logging utility in core/orchestrator.py instead of just basicConfig
 
 ## Architecture Plan
-To implement the feature of multi-language subtitle auto-embedding in the UGC video engine, we need to enhance the existing system to handle subtitle generation, timestamping, and embedding into videos. Here’s a detailed implementation plan:
+To introduce a robust file logging utility in `core/orchestrator.py`, we need to design a solution that enhances the current logging mechanism, making it more configurable and maintainable across the application. Here's a detailed implementation plan:
 
-### 1. **Understanding the Existing Structure**
+### Objectives
+- Implement a structured logging utility to replace or supplement the current `logging.basicConfig`.
+- Ensure log rotation to handle log file sizes and prevent disk space issues.
+- Allow for different log levels and formats for console and file outputs.
 
-The `core/video_stitcher.py` file is responsible for stitching videos, and the `utils/ffmpeg_tools.py` file likely contains utilities for interacting with FFmpeg. These will be critical in our implementation. The `services/tts_service.py` might be responsible for text-to-speech outputs, which we will need to parse and convert into subtitles.
+### Changes Required
 
-### 2. **New Components to Develop**
+#### 1. Create a Logging Configuration Module
+**File:** `core/logging_config.py`
 
-- **Subtitle Generator**: A utility to convert TTS outputs into SRT/ASS files.
-- **Subtitle Embedder**: A function to overlay subtitles onto videos using FFmpeg.
+**Purpose:** Centralize logging configuration to ensure consistency and reusability throughout the application.
 
-### 3. **Technical Implementation Plan**
+**Implementation:**
+- Define a function, `configure_logging()`, which sets up logging handlers, formatters, and log levels.
+- Use Python's `logging` module and `logging.handlers` for rotating file handlers.
 
-#### Step 1: Parse TTS Output
-- **File:** `services/tts_service.py`
-- **Class/Function:** Add `parse_tts_output(text: str, language: str) -> List[SubtitleEntry]`
-  - **Description:** Parse the TTS output to create a list of subtitle entries. Each entry should have a start time, end time, and text.
+```python
+import logging
+from logging.handlers import RotatingFileHandler
 
-#### Step 2: Generate Subtitle Files
-- **File:** Create new file `utils/subtitle_generator.py`
-  - **Function:** `generate_subtitle_file(entries: List[SubtitleEntry], file_format: str = 'srt') -> str`
-    - **Description:** Generate a subtitle file (SRT/ASS) from subtitle entries and return the file path.
-    - **Implementation:** Write the SRT/ASS format using the start and end timestamps from `SubtitleEntry`.
+def configure_logging(log_file='orchestrator.log', max_bytes=10485760, backup_count=5):
+    # Create a logger
+    logger = logging.getLogger('orchestrator')
+    logger.setLevel(logging.DEBUG)  # Set to lowest level; individual handlers can filter
 
-#### Step 3: Embed Subtitles into Video
-- **File:** `core/video_stitcher.py`
-- **Function:** Modify `stitch_videos_with_subtitles(video_path: str, subtitle_paths: List[str], output_path: str) -> None`
-  - **Description:** Use FFmpeg to overlay subtitle files onto the video.
-  - **Implementation:** Leverage `utils/ffmpeg_tools.py` to construct FFmpeg command for embedding subtitles.
+    # Create handlers
+    console_handler = logging.StreamHandler()
+    file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
 
-#### Step 4: Integrate into UGC Engine
-- **File:** Modify `core/orchestrator.py`
-  - **Function:** Update the appropriate orchestration method to include subtitle processing.
-  - **Process:**
-    - Retrieve TTS output for each language.
-    - Use `parse_tts_output` to convert TTS to subtitle entries.
-    - Generate subtitle files for each language using `generate_subtitle_file`.
-    - Call `stitch_videos_with_subtitles` to produce the final video with embedded subtitles.
+    # Set log level for handlers
+    console_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
 
-#### Step 5: Update Tests
-- **File:** `tests/e2e/README.md`
-  - **Add Tests:** Write end-to-end tests to ensure subtitles are correctly generated and embedded.
-  - **Scenarios:**
-    - Validate subtitle file creation for multiple languages.
-    - Verify video output includes all subtitles correctly.
+    # Create formatters and add to handlers
+    console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    console_handler.setFormatter(console_format)
+    file_handler.setFormatter(file_format)
+    
+    # Add handlers to the logger
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
 
-### 4. **Trade-offs and Considerations**
+    return logger
+```
 
-- **Complexity**: Adding subtitle support increases the orchestration complexity. Ensure the orchestration code remains modular.
-- **Performance**: Subtitle generation and embedding can be resource-intensive. Consider asynchronous processing if this becomes a bottleneck.
-- **Maintainability**: Introduce clear interfaces and documentation for the subtitle generation and embedding functions to facilitate future maintenance.
+#### 2. Modify `core/orchestrator.py`
+**Purpose:** Integrate the new logging utility into the `orchestrator.py` file to use the centralized logging configuration.
 
-### 5. **Documentation**
+**Implementation:**
+- Import `configure_logging` from `logging_config`.
+- Replace any existing basic logging configuration with an invocation of `configure_logging`.
 
-- **ADR**: Create an Architecture Decision Record to document the decision to add subtitle support and outline the rationale and alternatives considered.
-- **Update `ARCHITECTURE.md`**: Describe the new subtitle processing flow and how it integrates with the existing video stitching process.
+```python
+from core.logging_config import configure_logging
 
-By following this detailed plan, we can systematically add multi-language subtitle auto-embedding to the UGC video engine while maintaining clarity and scalability in the codebase.
+# Initialize the logger
+logger = configure_logging()
+
+def some_function():
+    logger.debug("This is a debug message")
+    logger.info("This is an info message")
+    logger.warning("This is a warning message")
+    logger.error("This is an error message")
+    logger.critical("This is a critical message")
+```
+
+#### 3. Update Documentation
+- **File:** `docs/README.en.md`
+  - Document the new logging mechanism, how to configure it, and examples of using different log levels.
+  - Explain how log rotation is configured and how developers can adjust the `max_bytes` and `backup_count` parameters.
+
+### Additional Considerations
+
+- **Environment Configuration:** Allow the log file path, max bytes, and backup count to be configurable via environment variables or a configuration file. This will make it easier to adjust the settings without code changes.
+  
+- **Testing:**
+  - Write unit tests (in `tests/`) to ensure that the logging configuration is correctly applied.
+  - Create tests to verify log rotation behavior and correct log formatting.
+
+- **Dependency Management:** Ensure that the `logging` module is available in the environment. If using additional logging libraries, update `package.json` accordingly.
+
+### Trade-offs
+
+- **Complexity:** Adding a centralized logging module increases the initial complexity of the codebase. However, this complexity is justified by the benefits of having a consistent and configurable logging mechanism.
+- **Performance:** Logging to files can introduce I/O overhead. However, the use of rotating file handlers mitigates the risk of performance degradation due to large log files.
 
 ## Developer Code
-Certainly! Based on the architect's plan, here's the implementation of the multi-language subtitle auto-embedding feature:
+Here's the Python code implementation based on the Architect's plan:
 
-### Step 1: Parse TTS Output
-
-First, we'll modify `services/tts_service.py` to include a function for parsing TTS output.
+### 1. Create `core/logging_config.py`
 
 ```python
-# filepath: services/tts_service.py
+# filepath: core/logging_config.py
 
-from typing import List, NamedTuple
+import logging
+from logging.handlers import RotatingFileHandler
 
-class SubtitleEntry(NamedTuple):
-    start_time: str
-    end_time: str
-    text: str
+def configure_logging(log_file='orchestrator.log', max_bytes=10485760, backup_count=5):
+    # Create a logger
+    logger = logging.getLogger('orchestrator')
+    logger.setLevel(logging.DEBUG)  # Set to lowest level; individual handlers can filter
 
-def parse_tts_output(text: str, language: str) -> List[SubtitleEntry]:
-    """
-    Parse the TTS output to create a list of subtitle entries.
-    Each entry should have a start time, end time, and text.
-    """
-    # Assume `text` is a structured string with time markers
-    # This is a placeholder implementation
-    entries = []
-    lines = text.split('\n')
-    for line in lines:
-        parts = line.split(',')
-        if len(parts) == 3:
-            start_time, end_time, subtitle_text = parts
-            entries.append(SubtitleEntry(start_time, end_time, subtitle_text))
-    return entries
+    # Create handlers
+    console_handler = logging.StreamHandler()
+    file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
+
+    # Set log level for handlers
+    console_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
+
+    # Create formatters and add to handlers
+    console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    console_handler.setFormatter(console_format)
+    file_handler.setFormatter(file_format)
+    
+    # Add handlers to the logger
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
+    return logger
 ```
 
-### Step 2: Generate Subtitle Files
-
-Next, we'll create a new utility for generating subtitle files.
-
-```python
-# filepath: utils/subtitle_generator.py
-
-from typing import List
-from services.tts_service import SubtitleEntry
-
-def generate_subtitle_file(entries: List[SubtitleEntry], file_format: str = 'srt') -> str:
-    """
-    Generate a subtitle file (SRT/ASS) from subtitle entries and return the file path.
-    """
-    file_path = f"subtitles.{file_format}"
-    with open(file_path, 'w') as file:
-        for index, entry in enumerate(entries, start=1):
-            file.write(f"{index}\n")
-            file.write(f"{entry.start_time} --> {entry.end_time}\n")
-            file.write(f"{entry.text}\n\n")
-    return file_path
-```
-
-### Step 3: Embed Subtitles into Video
-
-We'll now enhance the `core/video_stitcher.py` to overlay subtitles onto videos using FFmpeg.
-
-```python
-# filepath: core/video_stitcher.py
-
-from utils.ffmpeg_tools import run_ffmpeg_command
-
-def stitch_videos_with_subtitles(video_path: str, subtitle_paths: List[str], output_path: str) -> None:
-    """
-    Use FFmpeg to overlay subtitle files onto the video.
-    """
-    subtitle_options = ' '.join([f"-vf subtitles={subtitle}" for subtitle in subtitle_paths])
-    command = f"ffmpeg -i {video_path} {subtitle_options} {output_path}"
-    run_ffmpeg_command(command)
-```
-
-### Step 4: Integrate into UGC Engine
-
-We will modify `core/orchestrator.py` to integrate the subtitle processing into the video processing workflow.
+### 2. Modify `core/orchestrator.py`
 
 ```python
 # filepath: core/orchestrator.py
 
-from services.tts_service import parse_tts_output
-from utils.subtitle_generator import generate_subtitle_file
-from core.video_stitcher import stitch_videos_with_subtitles
+from core.logging_config import configure_logging
 
-def process_video_with_subtitles(video_path: str, tts_outputs: dict, output_path: str) -> None:
-    """
-    Process video with multi-language subtitles.
-    """
-    subtitle_paths = []
-    for language, tts_output in tts_outputs.items():
-        entries = parse_tts_output(tts_output, language)
-        subtitle_file = generate_subtitle_file(entries)
-        subtitle_paths.append(subtitle_file)
-    
-    stitch_videos_with_subtitles(video_path, subtitle_paths, output_path)
+# Initialize the logger
+logger = configure_logging()
+
+def some_function():
+    logger.debug("This is a debug message")
+    logger.info("This is an info message")
+    logger.warning("This is a warning message")
+    logger.error("This is an error message")
+    logger.critical("This is a critical message")
 ```
 
-### Step 5: Update Tests
+### 3. Update Documentation in `docs/README.en.md`
 
-Finally, we should update the tests to ensure the new functionality works correctly.
+```markdown
+# filepath: docs/README.en.md
+
+## Logging Mechanism
+
+The application now uses a centralized logging utility to handle log management, ensuring consistent logging practices across the application.
+
+### Configuration
+The logging configuration is set up in `core/logging_config.py`. It features:
+
+- **Console and File Logging:** Logs are output to both the console and a specified file.
+- **Log Rotation:** The file handler rotates logs based on size to prevent excessive disk usage.
+- **Log Levels:** Different log levels can be set for console and file outputs.
+
+### Usage
+
+To use logging in your module, import and initialize the logger:
 
 ```python
-# filepath: tests/e2e/test_subtitle_integration.py
+from core.logging_config import configure_logging
 
-import unittest
-from core.orchestrator import process_video_with_subtitles
+logger = configure_logging()
 
-class TestSubtitleIntegration(unittest.TestCase):
-
-    def test_subtitle_file_creation(self):
-        # Mock TTS output
-        tts_outputs = {
-            'en': "00:00:01,00:00:02,Hello\n00:00:03,00:00:04,World",
-            'es': "00:00:01,00:00:02,Hola\n00:00:03,00:00:04,Mundo"
-        }
-        video_path = 'input.mp4'
-        output_path = 'output.mp4'
-        
-        process_video_with_subtitles(video_path, tts_outputs, output_path)
-        
-        # Assertions would check the existence of the output files and validate their content
-        # This is a placeholder
-        self.assertTrue(True)
-
-if __name__ == '__main__':
-    unittest.main()
+logger.info("This is an info log")
+logger.error("This is an error log")
 ```
 
-These code snippets implement the required features according to the architect's plan, ensuring that the system can parse TTS outputs, generate subtitle files, and embed them into videos.
+### Customization
+
+You can customize the log file path, maximum file size, and backup count by modifying the parameters in `configure_logging()`:
+
+- **log_file:** The filename for logging (default `orchestrator.log`).
+- **max_bytes:** The maximum size (in bytes) for a log file before it gets rotated (default `10485760` bytes, or 10MB).
+- **backup_count:** The number of backup files to keep (default `5`).
+
+### Environment Configuration
+
+Consider using environment variables or a configuration file to set logging parameters dynamically without changing code.
+
+### Testing
+
+Ensure your logging is behaving correctly by running our unit tests located in the `tests/` directory.
+```
+
+This implementation ensures a structured, maintainable logging system with clear documentation for developers to follow and customize as needed.
 
 ## Code Review & Final Code
-## Summary
+## Review Summary
 
-Overall, the code implementation aligns well with the feature goal of adding multi-language subtitle auto-embedding. However, there are some issues related to maintainability, error handling, and testing that need attention. I will review each part and suggest improvements.
+The implementation of the file logging utility in `core/orchestrator.py` is a solid improvement over basic logging setup. It introduces a robust logging configuration, which includes log rotation and separate log levels for console and file outputs. The documentation is clear and provides good guidance on usage and customization. However, there are a few areas that could be improved for security, maintainability, and clarity.
 
-### Step 1: Parse TTS Output
+### Key Feedback
 
-🔴 **Blocker: Error Handling and Input Validation**
-- Currently, the `parse_tts_output` function assumes a perfect input format. There should be error handling for unexpected formats and validation on the input data.
+🔴 **Security: Environment Configuration and Sensitive Information**
+- It's crucial to ensure that sensitive information is not logged inadvertently. Consider adding filters or using a logging configuration that obfuscates sensitive data.
 
-```python
-# filepath: services/tts_service.py
+🟡 **Maintainability: Dynamic Configuration**
+- While the documentation suggests using environment variables or a configuration file for logging parameters, the code itself does not currently support this. Implementing this would enhance flexibility and maintainability.
 
-from typing import List, NamedTuple, Optional
+🟡 **Correctness: Logger Duplication**
+- Each call to `configure_logging()` creates a new set of handlers, potentially leading to duplicate log messages. Consider using a singleton pattern or a guard clause to prevent re-adding handlers if the logger is already configured.
 
-class SubtitleEntry(NamedTuple):
-    start_time: str
-    end_time: str
-    text: str
+💭 **Nits: Default Parameter Values**
+- Consider exposing the default parameter values at the top of the `configure_logging` function for easier adjustment and clarity.
 
-def parse_tts_output(text: str, language: str) -> List[SubtitleEntry]:
-    """
-    Parse the TTS output to create a list of subtitle entries.
-    Each entry should have a start time, end time, and text.
-    """
-    entries = []
-    lines = text.split('\n')
-    for line in lines:
-        parts = line.split(',')
-        if len(parts) == 3:
-            start_time, end_time, subtitle_text = parts
-            entries.append(SubtitleEntry(start_time.strip(), end_time.strip(), subtitle_text.strip()))
-        else:
-            # Log or handle unexpected format
-            print(f"Warning: Unexpected line format: {line}")
-    return entries
-```
-
-### Step 2: Generate Subtitle Files
-
-🟡 **Suggestion: File Path Handling**
-- The subtitle file path should be dynamically generated to avoid overwriting files and should include language and timestamp identifiers for uniqueness.
+### Suggested Improvements
 
 ```python
-# filepath: utils/subtitle_generator.py
+# filepath: core/logging_config.py
 
-from typing import List
-from services.tts_service import SubtitleEntry
-import os
-import time
-
-def generate_subtitle_file(entries: List[SubtitleEntry], language: str, file_format: str = 'srt') -> str:
-    """
-    Generate a subtitle file (SRT/ASS) from subtitle entries and return the file path.
-    """
-    timestamp = int(time.time())
-    file_path = f"subtitles_{language}_{timestamp}.{file_format}"
-    
-    with open(file_path, 'w') as file:
-        for index, entry in enumerate(entries, start=1):
-            file.write(f"{index}\n")
-            file.write(f"{entry.start_time} --> {entry.end_time}\n")
-            file.write(f"{entry.text}\n\n")
-    
-    return file_path
-```
-
-### Step 3: Embed Subtitles into Video
-
-🔴 **Blocker: Security and Path Handling**
-- Ensure subtitle file paths are properly sanitized to prevent command injection vulnerabilities.
-
-```python
-# filepath: core/video_stitcher.py
-
-from utils.ffmpeg_tools import run_ffmpeg_command
-import shlex
-
-def stitch_videos_with_subtitles(video_path: str, subtitle_paths: List[str], output_path: str) -> None:
-    """
-    Use FFmpeg to overlay subtitle files onto the video.
-    """
-    subtitle_options = ' '.join([f"-vf subtitles={shlex.quote(subtitle)}" for subtitle in subtitle_paths])
-    command = f"ffmpeg -i {shlex.quote(video_path)} {subtitle_options} {shlex.quote(output_path)}"
-    run_ffmpeg_command(command)
-```
-
-### Step 4: Integrate into UGC Engine
-
-🟡 **Suggestion: Improved Logging and Error Handling**
-- Add logging to track the processing flow and handle any potential errors gracefully.
-
-```python
-# filepath: core/orchestrator.py
-
-from services.tts_service import parse_tts_output
-from utils.subtitle_generator import generate_subtitle_file
-from core.video_stitcher import stitch_videos_with_subtitles
 import logging
-
-def process_video_with_subtitles(video_path: str, tts_outputs: dict, output_path: str) -> None:
-    """
-    Process video with multi-language subtitles.
-    """
-    logging.basicConfig(level=logging.INFO)
-    subtitle_paths = []
-    
-    for language, tts_output in tts_outputs.items():
-        try:
-            entries = parse_tts_output(tts_output, language)
-            subtitle_file = generate_subtitle_file(entries, language)
-            subtitle_paths.append(subtitle_file)
-            logging.info(f"Generated subtitle file for {language}: {subtitle_file}")
-        except Exception as e:
-            logging.error(f"Failed to process subtitles for {language}: {e}")
-            continue
-    
-    try:
-        stitch_videos_with_subtitles(video_path, subtitle_paths, output_path)
-        logging.info(f"Video processed successfully with subtitles. Output: {output_path}")
-    except Exception as e:
-        logging.error(f"Failed to stitch video with subtitles: {e}")
-```
-
-### Step 5: Update Tests
-
-🟡 **Suggestion: Expand Test Coverage**
-- The test should validate the actual creation and correctness of the subtitle files, not just a placeholder assertion.
-
-```python
-# filepath: tests/e2e/test_subtitle_integration.py
-
-import unittest
+from logging.handlers import RotatingFileHandler
 import os
-from core.orchestrator import process_video_with_subtitles
 
-class TestSubtitleIntegration(unittest.TestCase):
+def configure_logging(log_file=None, max_bytes=None, backup_count=None):
+    # Default parameter values
+    log_file = log_file or os.getenv('LOG_FILE', 'orchestrator.log')
+    max_bytes = max_bytes or int(os.getenv('LOG_MAX_BYTES', 10485760))
+    backup_count = backup_count or int(os.getenv('LOG_BACKUP_COUNT', 5))
 
-    def test_subtitle_file_creation(self):
-        # Mock TTS output
-        tts_outputs = {
-            'en': "00:00:01,00:00:02,Hello\n00:00:03,00:00:04,World",
-            'es': "00:00:01,00:00:02,Hola\n00:00:03,00:00:04,Mundo"
-        }
-        video_path = 'input.mp4'
-        output_path = 'output.mp4'
+    # Create a logger
+    logger = logging.getLogger('orchestrator')
+    
+    if not logger.hasHandlers():
+        logger.setLevel(logging.DEBUG)  # Set to lowest level; individual handlers can filter
 
-        process_video_with_subtitles(video_path, tts_outputs, output_path)
-        
-        # Check for existence of subtitle files
-        for lang in tts_outputs.keys():
-            subtitle_file = f"subtitles_{lang}_*.srt"
-            self.assertTrue(any([os.path.exists(file) for file in glob.glob(subtitle_file)]), f"Subtitle file for {lang} not found.")
-        
-        # Check for output video file
-        self.assertTrue(os.path.exists(output_path), "Output video file was not created.")
+        # Create handlers
+        console_handler = logging.StreamHandler()
+        file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
 
-if __name__ == '__main__':
-    unittest.main()
+        # Set log level for handlers
+        console_handler.setLevel(logging.INFO)
+        file_handler.setLevel(logging.DEBUG)
+
+        # Create formatters and add to handlers
+        console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        console_handler.setFormatter(console_format)
+        file_handler.setFormatter(file_format)
+
+        # Add handlers to the logger
+        logger.addHandler(console_handler)
+        logger.addHandler(file_handler)
+
+    return logger
 ```
 
-## Final Notes
+### Additional Suggestions
 
-- Ensure logging is set up to capture all relevant processing steps.
-- Consider adding more robust input validation and error handling across the board.
-- Expand test coverage to cover edge cases and potential errors.
+- Implement unit tests to verify that the logging configuration behaves as expected, including log rotation and handler configuration.
+- Consider implementing a mechanism to sanitize logs to avoid leaking sensitive information.
+- Review the use of logging levels across the application to ensure consistency and appropriate use.
+
+### Conclusion
+
+The current implementation is a significant step forward in creating a more robust logging infrastructure. Addressing the above suggestions will further enhance the security, flexibility, and reliability of the logging system. Keep up the good work!

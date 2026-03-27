@@ -25,18 +25,53 @@ class EcommercePipeline:
         print("\n[Script Output]\n", script_output[:200], "...\n")
         
         # 3. Hand-off to Python Engine (Video Stitcher/Orchestrator)
-        # We simulate the bridge to the imported UGC-video-pro engine here.
+        print("\n[Engine Handoff] Parsing script into structured VideoRequest...")
+        parser_profile = self.loader.load_prompt("marketing/marketing-content-creator.md") # Repurpose to parse
+        parse_input = (
+            f"Extract the main visual prompt and metadata from this script.\n"
+            f"Return ONLY valid JSON: {{\"text_prompt\": \"...\", \"duration\": 30, \"language\": \"zh\"}}\n"
+            f"Script: {script_output}"
+        )
+        parsed_json = await self.client.process_task(parser_profile, parse_input, response_format=True)
+        
         try:
-            from commercial_engine.core.orchestrator import VideoRequest, UGCProducer
-            # Here we inject the generated hooks into the request context.
-            print("\n[Engine Handoff] Preparing to send to commercial_engine...")
-            # Note: actual engine requires full config, mocking for demonstration
-            print(f"-> Successfully bridged Agency-Agent script into Video Stitcher queue.")
-        except ImportError:
-            print("[Warning] commercial_engine not fully configured/available yet.")
+            req_data = json.loads(parsed_json)
+            import yaml
+            
+            # Load Commercial Engine config
+            config_path = self.repo_root / "src" / "commercial_engine" / "config.yaml"
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+                
+            from commercial_engine.core.orchestrator import VideoRequest, VideoOrchestrator
+            
+            req = VideoRequest(
+                user_id=1,
+                chat_id=1,
+                mode="text2video",
+                model="auto",
+                duration=req_data.get("duration", 30),
+                language=req_data.get("language", "zh"),
+                text_prompt=req_data.get("text_prompt", product_name),
+            )
+            
+            orchestrator = VideoOrchestrator(config)
+            print(f"-> Successfully parsed VideoRequest. Dispatching to VideoOrchestrator in background...")
+            
+            # Fire and forget in the background (or await if we want to block)
+            # For pipeline demonstration, we will await it so the logs show.
+            # In a real app, this would be: asyncio.create_task(orchestrator.generate(req))
+            result = await orchestrator.generate(req)
+            print(f"\n[Success] Video synthesized: {result.video_path}")
+            
+        except ImportError as e:
+            print(f"[Warning] commercial_engine not fully configured/available yet: {e}")
+        except Exception as e:
+            print(f"[Error] Pipeline execution failed: {e}")
             
         return script_output
 
 if __name__ == "__main__":
+    import yaml # ensuring yaml is available
     p = EcommercePipeline(str(Path(__file__).parent.parent.parent.parent))
     asyncio.run(p.run("Summer Cooling Neck Fan", "Portable, 12h battery, Ice-feel technology"))
