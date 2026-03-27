@@ -41,6 +41,7 @@ from services.url_extractor import URLExtractor
 from services.publisher import TikTokPublisher, YouTubeShortsPublisher, DouyinPublisher, InstagramReelsPublisher
 from services.viral_copywriter import ViralCopywriter
 from services.bgm_matcher import AIBGMMatcher
+from services.video_intelligence import VideoIntelligenceExtractor
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -104,6 +105,7 @@ class VideoOrchestrator:
         # Core pipeline modules (used by both Director and legacy modes)
         self.image_analyzer = ImageAnalyzer(config)
         self.url_extractor = URLExtractor(config)
+        self.video_intel = VideoIntelligenceExtractor(config)
         self.script_generator = ScriptGenerator(config)
         self.frame_chainer = FrameChainer(config)
         self.video_stitcher = VideoStitcher(config)
@@ -487,13 +489,23 @@ class VideoOrchestrator:
         if request.text_prompt:
             product_analysis["user_description"] = request.text_prompt
 
-        # Step 3: Extract URL content
+        # Step 3: Extract URL content (with deep video intelligence for video URLs)
         url_content = request.url_content
         if request.url and not url_content:
             await update_status("extracting_url")
             try:
-                url_content = await self.url_extractor.extract(request.url)
-                logger.info(f"URL extracted: {len(url_content or '')} chars")
+                # Detect if URL is a video platform → use deep extraction
+                platform = VideoIntelligenceExtractor._detect_platform(request.url)
+                if platform != "unknown":
+                    logger.info(f"Detected video platform: {platform}. Using deep video intelligence...")
+                    await update_status("deep_video_analysis")
+                    intel_report = await self.video_intel.analyze(request.url)
+                    url_content = intel_report.to_prompt_context()
+                    logger.info(f"Deep extraction complete: {len(intel_report.transcript)} chars transcript, "
+                                f"{intel_report.duration_seconds:.0f}s video from {platform}")
+                else:
+                    url_content = await self.url_extractor.extract(request.url)
+                    logger.info(f"URL extracted: {len(url_content or '')} chars")
             except Exception as e:
                 logger.warning(f"URL extraction failed: {e} — continuing without URL content")
                 url_content = None
