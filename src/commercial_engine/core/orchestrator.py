@@ -40,6 +40,7 @@ from services.image_analyzer import ImageAnalyzer
 from services.url_extractor import URLExtractor
 from services.publisher import TikTokPublisher, YouTubeShortsPublisher, DouyinPublisher, InstagramReelsPublisher
 from services.viral_copywriter import ViralCopywriter
+from services.bgm_matcher import AIBGMMatcher
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +133,13 @@ class VideoOrchestrator:
             self.viral_copywriter = ViralCopywriter(config)
         else:
             self.viral_copywriter = None
+
+        # BGM Matcher Agent
+        bgm_config = config.get("bgm_matcher", {})
+        if bgm_config.get("enabled", True):
+            self.bgm_matcher = AIBGMMatcher(config)
+        else:
+            self.bgm_matcher = None
 
         # Director Agent (new in v3.0)
         self._director = None
@@ -325,6 +333,15 @@ class VideoOrchestrator:
                 final_path = segment_paths[0]
             else:
                 raise RuntimeError(f"Video stitching failed: {e}") from e
+
+        # [NEW] Add Background Music here
+        if getattr(self, "bgm_matcher", None):
+            await update_status("adding_bgm")
+            try:
+                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
+                final_path = await self.bgm_matcher.add_bgm(final_path, context)
+            except Exception as e:
+                logger.warning(f"BGM Matcher failed, skipping BGM: {e}")
 
         # TTS generation (multi-language, parallel)
         tts_paths = {}
@@ -539,6 +556,15 @@ class VideoOrchestrator:
                 final_path = segment_paths[0]
             else:
                 raise RuntimeError(f"Video stitching failed: {e}") from e
+
+        # [NEW] Add Background Music here
+        if getattr(self, "bgm_matcher", None):
+            await update_status("adding_bgm")
+            try:
+                context = script.raw_json if hasattr(script, 'raw_json') else str(request.text_prompt)
+                final_path = await self.bgm_matcher.add_bgm(final_path, context)
+            except Exception as e:
+                logger.warning(f"BGM Matcher failed, skipping BGM: {e}")
 
         # Step 7: Upload to Google Drive
         drive_link = None

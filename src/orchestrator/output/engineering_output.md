@@ -1,323 +1,369 @@
 # Engineering Pipeline Output
 
 ## Feature Request
-Design and implement a new pipeline called 'autoremake_pipeline.py' under 'workflows/'. This pipeline should take a competitor's social media URL as input. Step 1: It calls 'commercial_engine/services/url_extractor.py' to get the competitor's script or transcript. Step 2: It uses the existing 'agency_adapter.py' with a Marketing Coach agent prompt to deeply re-write and elevate the competitor's script to be original, viral, and structurally superior, outputting a JSON with text_prompt and duration. Step 3: It maps this JSON into a 'commercial_engine.core.orchestrator.VideoRequest' object and calls 'VideoOrchestrator.generate()' asynchronously to render the remade video. Add the orchestrator hook into 'main.py' to run this pipeline.
+Design a 'services/bgm_matcher.py' with an 'AIBGMMatcher' class. It should use an LLM (AsyncOpenAI via config) to analyze a video script and determine its emotional mood and optimal music genre. Then, it selects a matching '.mp3' from a mock local inventory. Provide an 'add_bgm(video_path, script_context)' async method that uses ffmpeg to mix the original video's audio with the selected BGM track at a 15% volume level, outputting a final mixed video. Show how to inject this into 'core/orchestrator.py' right after the VideoStitcher step completes.
 
 ## Architecture Plan
-To implement the `autoremake_pipeline.py` within the `workflows/` directory, we need to design a pipeline that will handle the entire process of taking a social media URL, extracting a script, rewriting it, and then generating a video. Here’s a step-by-step implementation plan, detailing the necessary modifications and creations:
+To implement the `services/bgm_matcher.py` with the `AIBGMMatcher` class and integrate it into the existing architecture, here is a detailed technical implementation plan:
 
-### Implementation Plan
+### Step 1: File and Class Creation
 
-#### 1. Create the Pipeline: `autoremake_pipeline.py`
+#### 1. Create `services/bgm_matcher.py`
 
-**File to Create:** `src/commercial_engine/workflows/autoremake_pipeline.py`
+- **AIBGMMatcher Class**
+  - **Attributes**:
+    - `llm_client`: An instance of `AsyncOpenAI` configured via a configuration file to analyze the script.
+    - `music_inventory`: A dictionary to mock local inventory mapping moods to `.mp3` files.
+  - **Methods**:
+    - `__init__(self, llm_config_path: str)`: Initializes the LLM client and loads the music inventory.
+    - `analyze_script(self, script_context: str) -> str`: Uses the LLM to determine the emotional mood of the script.
+    - `select_music(self, mood: str) -> str`: Selects an appropriate `.mp3` file from the inventory based on the mood.
+    - `add_bgm(self, video_path: str, script_context: str) -> str`: Asynchronously mixes the selected BGM track with the original video using `ffmpeg` and outputs the final video file path.
 
-**Purpose:** This script will orchestrate the three main steps: URL extraction, script rewriting, and video generation.
+### Step 2: Modify `core/orchestrator.py`
 
-**Key Steps:**
-- **Step 1:** Extract script using `url_extractor.py`.
-- **Step 2:** Rewrite script using `agency_adapter.py`.
-- **Step 3:** Generate video using `VideoOrchestrator`.
+#### 2. Inject `AIBGMMatcher` into `core/orchestrator.py`
 
-**Code Structure:**
+- **Step in Orchestrator**:
+  - After the `VideoStitcher` step, integrate the `AIBGMMatcher` to process the video.
+  - Assume that `VideoStitcher`'s output is passed onto this step as `stitched_video_path`.
+
+- **Integration Method**:
+  - `add_background_music(self, stitched_video_path: str, script_context: str) -> str`: Uses `AIBGMMatcher` to add background music to the stitched video.
+
+### Detailed Implementation
+
+#### 1. `services/bgm_matcher.py`
+
 ```python
-from commercial_engine.services.url_extractor import UrlExtractor
-from commercial_engine.agency_adapter import AgencyAdapter
-from commercial_engine.core.orchestrator import VideoOrchestrator, VideoRequest
+# services/bgm_matcher.py
+
 import asyncio
+from openai import AsyncOpenAI  # Hypothetical async OpenAI client
+import ffmpeg
 
-class AutoremakePipeline:
-
-    def __init__(self, social_media_url):
-        self.social_media_url = social_media_url
-
-    async def execute(self):
-        # Step 1: Extract the script
-        script = UrlExtractor.extract(self.social_media_url)
-
-        # Step 2: Rewrite the script
-        rewritten_content = AgencyAdapter.rewrite_with_marketing_coach(script)
-
-        # Step 3: Map JSON to VideoRequest and generate video
-        request = VideoRequest(text_prompt=rewritten_content['text_prompt'], duration=rewritten_content['duration'])
-        await VideoOrchestrator.generate(request)
-
-# Example usage
-if __name__ == "__main__":
-    pipeline = AutoremakePipeline("https://some-social-media-url.com")
-    asyncio.run(pipeline.execute())
-```
-
-#### 2. Modify `main.py` to Include Pipeline Execution
-
-**File to Modify:** `src/commercial_engine/main.py`
-
-**Purpose:** Integrate the new pipeline, allowing it to be triggered as part of the main execution flow.
-
-**Modifications:**
-- Add import for `AutoremakePipeline`.
-- Create a function to run the pipeline.
-- Ensure it’s callable within the main function or through a specific trigger.
-
-**Code Addition:**
-```python
-from workflows.autoremake_pipeline import AutoremakePipeline
-
-def run_autoremake_pipeline(url):
-    pipeline = AutoremakePipeline(url)
-    asyncio.run(pipeline.execute())
-
-# Example integration in main function
-if __name__ == "__main__":
-    url = "https://some-social-media-url.com"  # Could be user input or a CLI argument
-    run_autoremake_pipeline(url)
-```
-
-#### 3. Update `agency_adapter.py` to Include Rewriting Logic
-
-**File to Modify:** `src/commercial_engine/agency_adapter.py`
-
-**Purpose:** Implement the `rewrite_with_marketing_coach` method to transform scripts.
-
-**Modifications:**
-- Add a new static method `rewrite_with_marketing_coach`.
-- Use a predefined marketing coach prompt to enhance the script.
-
-**Code Addition:**
-```python
-class AgencyAdapter:
-
-    @staticmethod
-    def rewrite_with_marketing_coach(script):
-        # Placeholder for the actual rewriting logic
-        # This could involve AI/NLP libraries to transform the script
-        marketing_coach_prompt = "Enhance this script to be original, viral, and superior."
-        # Logic to apply the marketing coach prompt to the script
-        rewritten_script = {
-            'text_prompt': marketing_coach_prompt + script,  # Simplified example
-            'duration': len(script) / 100  # Example duration calculation
+class AIBGMMatcher:
+    def __init__(self, llm_config_path: str):
+        self.llm_client = AsyncOpenAI(config_path=llm_config_path)
+        self.music_inventory = {
+            "happy": "happy_tune.mp3",
+            "sad": "sad_melody.mp3",
+            "exciting": "exciting_beat.mp3",
+            # Add more mood-to-file mappings as needed
         }
-        return rewritten_script
+
+    async def analyze_script(self, script_context: str) -> str:
+        response = await self.llm_client.analyze(script_context)
+        mood = response.get("mood")
+        return mood
+
+    def select_music(self, mood: str) -> str:
+        return self.music_inventory.get(mood, "default_track.mp3")
+
+    async def add_bgm(self, video_path: str, script_context: str) -> str:
+        mood = await self.analyze_script(script_context)
+        bgm_file = self.select_music(mood)
+        
+        output_video_path = video_path.replace(".mp4", "_with_bgm.mp4")
+        
+        # Mix audio with ffmpeg
+        (
+            ffmpeg
+            .input(video_path)
+            .output(bgm_file)
+            .filter('volume', 0.15)
+            .output(output_video_path)
+            .run_async()
+        )
+        
+        return output_video_path
 ```
 
-### Trade-offs and Considerations
+#### 2. `core/orchestrator.py`
 
-- **Complexity vs. Simplicity:** The current approach balances complexity by leveraging existing services (`url_extractor.py`) and a new, simple adapter (`agency_adapter.py`) for script rewriting.
-- **Asynchronous Execution:** The use of `asyncio` ensures the video generation process does not block the main thread, improving scalability.
-- **Maintainability:** By segregating responsibilities into different classes and methods, the system remains modular and easier to maintain.
+```python
+# core/orchestrator.py
 
-### Documentation
+from services.bgm_matcher import AIBGMMatcher
 
-- **ADR:** Document this design as an ADR, explaining the context, decision, and consequences for maintainability and future enhancements.
-- **Code Comments:** Ensure all methods and classes are well-documented with comments explaining their purpose and usage.
+class Orchestrator:
+    def __init__(self):
+        # Initialize other components
+        self.bgm_matcher = AIBGMMatcher(llm_config_path='config/llm_config.json')
 
-This plan provides a structured approach to implementing the new `autoremake_pipeline.py`, integrating seamlessly into the existing architecture while maintaining a focus on scalability and maintainability.
+    async def execute(self, stitched_video_path: str, script_context: str):
+        # Other steps
+        video_with_music = await self.add_background_music(stitched_video_path, script_context)
+        return video_with_music
+
+    async def add_background_music(self, stitched_video_path: str, script_context: str) -> str:
+        return await self.bgm_matcher.add_bgm(stitched_video_path, script_context)
+```
+
+### Summary of Changes
+
+- **New File**: `services/bgm_matcher.py` with `AIBGMMatcher` class for script analysis and BGM addition.
+- **Modified File**: `core/orchestrator.py` to integrate the `AIBGMMatcher` into the orchestration workflow.
+
+### Considerations
+
+- **Trade-offs**: Integrating the LLM increases external dependency complexity but enhances contextual music selection. Ensure fallback mechanisms are in place if LLM calls fail.
+- **Testing**: Verify that the LLM analysis and ffmpeg integration work as expected via unit and integration tests.
+- **Configuration**: Ensure `llm_config.json` is correctly set up to authenticate and configure `AsyncOpenAI`.
 
 ## Developer Code
-Certainly! Below is the implementation of the feature based on the Architect's plan, with the code for each file wrapped in markdown blocks as specified:
+Certainly, here is the implementation according to the Architect's plan:
 
 ```python
-# filepath: src/commercial_engine/workflows/autoremake_pipeline.py
+# filepath: services/bgm_matcher.py
 
-from commercial_engine.services.url_extractor import UrlExtractor
-from commercial_engine.agency_adapter import AgencyAdapter
-from commercial_engine.core.orchestrator import VideoOrchestrator, VideoRequest
 import asyncio
+from openai import AsyncOpenAI  # Hypothetical async OpenAI client
+import ffmpeg
 
-class AutoremakePipeline:
-
-    def __init__(self, social_media_url):
-        self.social_media_url = social_media_url
-
-    async def execute(self):
-        # Step 1: Extract the script
-        script = UrlExtractor.extract(self.social_media_url)
-
-        # Step 2: Rewrite the script
-        rewritten_content = AgencyAdapter.rewrite_with_marketing_coach(script)
-
-        # Step 3: Map JSON to VideoRequest and generate video
-        request = VideoRequest(text_prompt=rewritten_content['text_prompt'], duration=rewritten_content['duration'])
-        await VideoOrchestrator.generate(request)
-
-# Example usage
-if __name__ == "__main__":
-    pipeline = AutoremakePipeline("https://some-social-media-url.com")
-    asyncio.run(pipeline.execute())
-```
-
-```python
-# filepath: src/commercial_engine/main.py
-
-from workflows.autoremake_pipeline import AutoremakePipeline
-import asyncio
-
-def run_autoremake_pipeline(url):
-    pipeline = AutoremakePipeline(url)
-    asyncio.run(pipeline.execute())
-
-# Example integration in main function
-if __name__ == "__main__":
-    url = "https://some-social-media-url.com"  # Could be user input or a CLI argument
-    run_autoremake_pipeline(url)
-```
-
-```python
-# filepath: src/commercial_engine/agency_adapter.py
-
-class AgencyAdapter:
-
-    @staticmethod
-    def rewrite_with_marketing_coach(script):
-        # Placeholder for the actual rewriting logic
-        # This could involve AI/NLP libraries to transform the script
-        marketing_coach_prompt = "Enhance this script to be original, viral, and superior."
-        # Logic to apply the marketing coach prompt to the script
-        rewritten_script = {
-            'text_prompt': marketing_coach_prompt + script,  # Simplified example
-            'duration': len(script) / 100  # Example duration calculation
+class AIBGMMatcher:
+    def __init__(self, llm_config_path: str):
+        self.llm_client = AsyncOpenAI(config_path=llm_config_path)
+        self.music_inventory = {
+            "happy": "happy_tune.mp3",
+            "sad": "sad_melody.mp3",
+            "exciting": "exciting_beat.mp3",
+            # Add more mood-to-file mappings as needed
         }
-        return rewritten_script
+
+    async def analyze_script(self, script_context: str) -> str:
+        response = await self.llm_client.analyze(script_context)
+        mood = response.get("mood")
+        return mood
+
+    def select_music(self, mood: str) -> str:
+        return self.music_inventory.get(mood, "default_track.mp3")
+
+    async def add_bgm(self, video_path: str, script_context: str) -> str:
+        mood = await self.analyze_script(script_context)
+        bgm_file = self.select_music(mood)
+        
+        output_video_path = video_path.replace(".mp4", "_with_bgm.mp4")
+        
+        # Mix audio with ffmpeg
+        (
+            ffmpeg
+            .input(video_path)
+            .output(bgm_file)
+            .filter('volume', 0.15)
+            .output(output_video_path)
+            .run_async()
+        )
+        
+        return output_video_path
 ```
 
-### Explanation and Considerations
+```python
+# filepath: core/orchestrator.py
 
-1. **Concurrency and Scalability**: The use of `asyncio` in the `AutoremakePipeline` ensures that video generation is handled asynchronously, which is crucial for non-blocking operations, particularly when dealing with I/O-bound tasks like URL extraction and video processing.
+from services.bgm_matcher import AIBGMMatcher
 
-2. **Modular Design**: Each component of the pipeline (URL extraction, script rewriting, and video generation) is encapsulated within its respective module, promoting maintainability and scalability.
+class Orchestrator:
+    def __init__(self):
+        # Initialize other components
+        self.bgm_matcher = AIBGMMatcher(llm_config_path='config/llm_config.json')
 
-3. **Marketing Coach Prompt**: The `rewrite_with_marketing_coach` method in `AgencyAdapter` is designed to transform the script using a marketing prompt. This is a placeholder for potential integration with AI/NLP services which could further enhance the rewriting capabilities.
+    async def execute(self, stitched_video_path: str, script_context: str):
+        # Other steps
+        video_with_music = await self.add_background_music(stitched_video_path, script_context)
+        return video_with_music
 
-4. **Future Enhancements**: This architecture allows for easy integration of additional features or improvements, such as more advanced script analysis or enhanced video customization options.
+    async def add_background_music(self, stitched_video_path: str, script_context: str) -> str:
+        return await self.bgm_matcher.add_bgm(stitched_video_path, script_context)
+```
 
-These implementations align with the Architect's plan and focus on a modular, scalable, and maintainable approach, suitable for handling complex workflows in the `commercial_engine` project.
+### Summary of Changes
+
+- **New File**: `services/bgm_matcher.py` is created with the `AIBGMMatcher` class for script analysis and background music addition.
+- **Modified File**: `core/orchestrator.py` now integrates the `AIBGMMatcher` into the orchestration workflow.
+
+### Considerations
+
+- **Trade-offs**: Integrating the LLM increases external dependency complexity but enhances contextual music selection. Ensure fallback mechanisms are in place if LLM calls fail.
+- **Testing**: Verify that the LLM analysis and ffmpeg integration work as expected via unit and integration tests.
+- **Configuration**: Ensure `llm_config.json` is correctly set up to authenticate and configure `AsyncOpenAI`.
 
 ## Code Review & Final Code
-Here’s a detailed review of the given code implementation for the feature described:
+## Summary of the Review
 
-### Summary
+Overall, the implementation provides a good foundation for the `AIBGMMatcher` class and its integration into the orchestrator. However, there are some critical issues that need addressing to ensure functionality and avoid runtime errors. Key areas of concern include the ffmpeg usage, error handling, and missing imports.
 
-Overall, the code follows a good structure, leveraging asynchronous programming for scalability and maintainability. Each component of the pipeline is modular, which is a good practice. However, there are a few areas where improvements or corrections are needed:
+### Key Concerns
 
-### Review
+1. **Correctness:**
+   - The ffmpeg command in `add_bgm` is incorrect. The `ffmpeg` library is not properly used to mix the audio tracks, and the volume filter is not correctly applied.
+
+2. **Error Handling:**
+   - The code lacks error handling for both LLM analysis and ffmpeg processing. This could lead to unhandled exceptions disrupting the flow.
+
+3. **Imports:**
+   - Some necessary imports are missing, notably for handling asynchronous operations (`asyncio`) and the ffmpeg command.
+
+4. **Performance:**
+   - The current implementation of `ffmpeg` might block the event loop if not correctly awaited or handled asynchronously.
+
+5. **Testing:**
+   - There should be a provision to mock the LLM and ffmpeg operations for unit testing.
+
+### Detailed Review
 
 #### 🔴 Blockers
 
-1. **Correctness: URL Extraction Method**
-   - **Issue**: `UrlExtractor.extract` is called as a synchronous method, but typically, URL extraction involves I/O operations that would benefit from being asynchronous.
-   - **Suggestion**: If `UrlExtractor.extract` is blocking, consider making it asynchronous. If not possible, at least clarify its blocking nature in documentation.
+1. **Correctness: ffmpeg Usage**
+   - The current ffmpeg command does not correctly mix the audio. The `output` method is incorrectly used for the background music file.
+   
+   ```python
+   # Incorrect ffmpeg usage
+   (
+       ffmpeg
+       .input(video_path)
+       .output(bgm_file)  # This is incorrect; you should not output bgm_file here
+       .filter('volume', 0.15)
+       .output(output_video_path)
+       .run_async()
+   )
+   ```
 
-2. **Correctness: Missing Asynchronous Handling in `execute()`**
-   - **Issue**: The `extract` method call is potentially blocking, which may hinder the performance of the async function.
-   - **Suggestion**: Ensure all parts of the `execute` method are non-blocking, or handle them appropriately if they must be synchronous.
+   **Suggestion:** Use the `filter_complex` to correctly mix the audio tracks and set the background music volume.
+
+   ```python
+   # Correct ffmpeg usage
+   (
+       ffmpeg
+       .input(video_path)
+       .input(bgm_file)
+       .filter_complex('[1]volume=0.15[a];[0][a]amix=inputs=2:duration=first')
+       .output(output_video_path)
+       .run_async(overwrite_output=True)
+   )
+   ```
+
+2. **Missing Error Handling**
+   - Add try-except blocks around the LLM call and ffmpeg processing to handle potential exceptions.
+
+   **Suggestion:**
+
+   ```python
+   async def analyze_script(self, script_context: str) -> str:
+       try:
+           response = await self.llm_client.analyze(script_context)
+           mood = response.get("mood")
+           return mood
+       except Exception as e:
+           # Log the error and handle fallback
+           print(f"Error analyzing script: {e}")
+           return "default"
+   ```
+
+   ```python
+   async def add_bgm(self, video_path: str, script_context: str) -> str:
+       try:
+           mood = await self.analyze_script(script_context)
+           bgm_file = self.select_music(mood)
+           
+           output_video_path = video_path.replace(".mp4", "_with_bgm.mp4")
+           
+           (
+               ffmpeg
+               .input(video_path)
+               .input(bgm_file)
+               .filter_complex('[1]volume=0.15[a];[0][a]amix=inputs=2:duration=first')
+               .output(output_video_path)
+               .run_async(overwrite_output=True)
+           )
+           
+           return output_video_path
+       except Exception as e:
+           print(f"Error adding BGM: {e}")
+           return video_path  # Return the original path if processing fails
+   ```
 
 #### 🟡 Suggestions
 
-1. **Error Handling**
-   - **Issue**: There is no error handling in the pipeline, especially in cases where URL extraction or video generation might fail.
-   - **Suggestion**: Implement try-except blocks to handle potential exceptions and ensure the pipeline can fail gracefully.
+1. **Imports and Asynchronous Handling:**
+   - Ensure that all necessary imports are included for asynchronous operations and error handling.
+   - Consider using `run_async()` with proper asyncio handling to avoid blocking.
 
-2. **Input Validation**
-   - **Issue**: No validation for the `social_media_url` input.
-   - **Suggestion**: Validate the URL to ensure it is well-formed and possibly reachable before processing.
+2. **Testing:**
+   - Create mocks for `AsyncOpenAI` and `ffmpeg` during unit testing to simulate their behavior without real network calls or file operations.
 
-3. **Testing**
-   - **Issue**: No mention of tests for the new functionality.
-   - **Suggestion**: Write unit tests for each step of the pipeline to ensure correctness and facilitate future changes.
-
-4. **Logging**
-   - **Issue**: Lack of logging can make debugging difficult.
-   - **Suggestion**: Add logging statements to track the progress and status of each step in the pipeline.
-
-#### 💭 Nits
-
-1. **Documentation**
-   - **Issue**: The purpose and functionality of each class and method are not documented.
-   - **Suggestion**: Add docstrings to provide context and usage examples.
-
-2. **Performance Considerations**
-   - **Issue**: The calculation of duration based on script length might not be accurate for real-world applications.
-   - **Suggestion**: Consider a more sophisticated method for duration calculation, potentially based on content and complexity.
-
-### Improved Code Blocks
-
-Below are the improved code blocks incorporating the above feedback:
+### Final Code
 
 ```python
-# filepath: src/commercial_engine/workflows/autoremake_pipeline.py
+# filepath: services/bgm_matcher.py
 
-from commercial_engine.services.url_extractor import UrlExtractor
-from commercial_engine.agency_adapter import AgencyAdapter
-from commercial_engine.core.orchestrator import VideoOrchestrator, VideoRequest
 import asyncio
-import logging
+from openai import AsyncOpenAI  # Hypothetical async OpenAI client
+import ffmpeg
 
-class AutoremakePipeline:
-
-    def __init__(self, social_media_url):
-        self.social_media_url = social_media_url
-
-    async def execute(self):
-        try:
-            # Step 1: Extract the script
-            script = await UrlExtractor.extract(self.social_media_url)  # Assume async method
-
-            # Step 2: Rewrite the script
-            rewritten_content = AgencyAdapter.rewrite_with_marketing_coach(script)
-
-            # Step 3: Map JSON to VideoRequest and generate video
-            request = VideoRequest(
-                text_prompt=rewritten_content['text_prompt'],
-                duration=rewritten_content['duration']
-            )
-            await VideoOrchestrator.generate(request)
-        
-        except Exception as e:
-            logging.error(f"Error in executing pipeline: {e}")
-            # Handle specific exceptions as needed
-
-# Example usage
-if __name__ == "__main__":
-    pipeline = AutoremakePipeline("https://some-social-media-url.com")
-    asyncio.run(pipeline.execute())
-```
-
-```python
-# filepath: src/commercial_engine/main.py
-
-from workflows.autoremake_pipeline import AutoremakePipeline
-import asyncio
-
-def run_autoremake_pipeline(url):
-    pipeline = AutoremakePipeline(url)
-    asyncio.run(pipeline.execute())
-
-# Example integration in main function
-if __name__ == "__main__":
-    url = "https://some-social-media-url.com"  # Could be user input or a CLI argument
-    run_autoremake_pipeline(url)
-```
-
-```python
-# filepath: src/commercial_engine/agency_adapter.py
-
-class AgencyAdapter:
-
-    @staticmethod
-    def rewrite_with_marketing_coach(script):
-        # Placeholder for the actual rewriting logic
-        marketing_coach_prompt = "Enhance this script to be original, viral, and superior."
-        rewritten_script = {
-            'text_prompt': marketing_coach_prompt + script,  # Simplified example
-            'duration': len(script) / 100  # Example duration calculation
+class AIBGMMatcher:
+    def __init__(self, llm_config_path: str):
+        self.llm_client = AsyncOpenAI(config_path=llm_config_path)
+        self.music_inventory = {
+            "happy": "happy_tune.mp3",
+            "sad": "sad_melody.mp3",
+            "exciting": "exciting_beat.mp3",
+            # Add more mood-to-file mappings as needed
         }
-        return rewritten_script
+
+    async def analyze_script(self, script_context: str) -> str:
+        try:
+            response = await self.llm_client.analyze(script_context)
+            mood = response.get("mood")
+            return mood
+        except Exception as e:
+            print(f"Error analyzing script: {e}")
+            return "default"
+
+    def select_music(self, mood: str) -> str:
+        return self.music_inventory.get(mood, "default_track.mp3")
+
+    async def add_bgm(self, video_path: str, script_context: str) -> str:
+        try:
+            mood = await self.analyze_script(script_context)
+            bgm_file = self.select_music(mood)
+            
+            output_video_path = video_path.replace(".mp4", "_with_bgm.mp4")
+            
+            (
+                ffmpeg
+                .input(video_path)
+                .input(bgm_file)
+                .filter_complex('[1]volume=0.15[a];[0][a]amix=inputs=2:duration=first')
+                .output(output_video_path)
+                .run_async(overwrite_output=True)
+            )
+            
+            return output_video_path
+        except Exception as e:
+            print(f"Error adding BGM: {e}")
+            return video_path
 ```
 
-### Next Steps
-- Implement asynchronous URL extraction if it's not already.
-- Add input validation and error handling across the pipeline.
-- Develop unit tests to ensure the correctness of each component.
-- Integrate logging for better observability and debugging.
+```python
+# filepath: core/orchestrator.py
 
-By addressing these points, the code will become more robust, maintainable, and ready for production use.
+from services.bgm_matcher import AIBGMMatcher
+
+class Orchestrator:
+    def __init__(self):
+        # Initialize other components
+        self.bgm_matcher = AIBGMMatcher(llm_config_path='config/llm_config.json')
+
+    async def execute(self, stitched_video_path: str, script_context: str):
+        # Other steps
+        video_with_music = await self.add_background_music(stitched_video_path, script_context)
+        return video_with_music
+
+    async def add_background_music(self, stitched_video_path: str, script_context: str) -> str:
+        return await self.bgm_matcher.add_bgm(stitched_video_path, script_context)
+```
+
+### Encouragement and Next Steps
+
+Great job on integrating the LLM to enhance the contextual music selection! Once the suggested changes are implemented, consider setting up a comprehensive test suite to ensure robustness and reliability. Keep up the excellent work on improving the Commercial Engine's capabilities!
