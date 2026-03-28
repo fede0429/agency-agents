@@ -1,0 +1,222 @@
+import os
+import time
+import json
+import asyncio
+import logging
+from typing import List, Dict, Any
+from fastapi import FastAPI, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from core.orchestrator import VideoOrchestrator
+from services.storyboard_agent import DirectorAgent
+from services.image_grid import create_character_grid
+
+# --- Constants & Configuration ---
+API_VERSION = "2.0.0"
+DEFAULT_VIDEO_STYLE = "premium"
+
+log = logging.getLogger("commercial_engine.api")
+logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="Commercial Video Engine API", version=API_VERSION)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- State Management ---
+_IN_MEMORY_TASK_STORE: Dict[str, Any] = {}
+_STORE_LOCK = asyncio.Lock()
+
+class CreateTaskRequest(BaseModel):
+    target_url: str
+    publish_platforms: List[str]
+    video_style: str = DEFAULT_VIDEO_STYLE
+    module_type: str
+
+async def _update_task_state(task_id: str, updates: Dict[str, Any]):
+    async with _STORE_LOCK:
+        if task_id in _IN_MEMORY_TASK_STORE:
+            _IN_MEMORY_TASK_STORE[task_id].update(updates)
+
+async def _append_timeline_event(task_id: str, event: Dict[str, Any]):
+    async with _STORE_LOCK:
+        if task_id in _IN_MEMORY_TASK_STORE:
+            _IN_MEMORY_TASK_STORE[task_id]["timeline"].append(event)
+            # Also set an event flag to wake up SSE subscribers
+            event_signal = _IN_MEMORY_TASK_STORE[task_id].get("_sse_event")
+            if event_signal:
+                event_signal.set()
+
+async def _run_orchestrator(task_id: str, target_url: str, platforms: List[str], module_type: str):
+    """
+    Revised pipeline integrating Toonflow-style Sub-Agents and Image Grid.
+    """
+    try:
+        config = {
+            "openai": {"api_key": os.environ.get("OPENAI_API_KEY", "mock-key")},
+            "storyboard": {"model": "gpt-4"}
+        }
+        
+        # 1. Image Grid Generation (Mocking finding multiple character images)
+        if module_type == "anime":
+            await _update_task_state(task_id, {"status": "analyzing", "source_metadata": {"url": target_url, "title": "[动漫] 视觉基线拼接中..."}, "progress_percent": 10})
+            await _append_timeline_event(task_id, {"step": "grid_merging", "status": "processing", "message": "Creating 3x3 Image Grid for consistency baseline."})
+            await asyncio.sleep(1) # simulate work
+            # Normally we'd call create_character_grid([img1, img2...], out_file)
+            await _append_timeline_event(task_id, {"step": "grid_merging", "status": "success"})
+
+        # 2. Sub-Agent Script Processing via DirectorAgent
+        await _update_task_state(task_id, {"status": "scripting", "progress_percent": 30})
+        director = DirectorAgent(config)
+        
+        script_snippet = "A brave hero enters the dark forest seeking the ancient sword."
+        async for progress_event in director.generate_episode_stream(script_text=script_snippet, style=module_type):
+            # Append each SSE yield from the Director into our timeline
+            await _append_timeline_event(task_id, progress_event)
+            if progress_event.get("step") == "complete":
+                async with _STORE_LOCK:
+                    _IN_MEMORY_TASK_STORE[task_id]["artifacts"] = {
+                        "script": script_snippet,
+                        "episode_data": progress_event.get("episode"),
+                        "video_url": None
+                    }
+
+        # 3. Stitching & Publishing
+        await _update_task_state(task_id, {"status": "stitching", "progress_percent": 75})
+        await _append_timeline_event(task_id, {"step": "stitching", "status": "processing", "message": "Applying assets to Video Models."})
+        await asyncio.sleep(2)
+        async with _STORE_LOCK:
+            _IN_MEMORY_TASK_STORE[task_id]["artifacts"]["video_url"] = "https://www.w3schools.com/html/mov_bbb.mp4"
+        await _append_timeline_event(task_id, {"step": "stitching", "status": "success"})
+
+        await _update_task_state(task_id, {"status": "publishing", "progress_percent": 90})
+        await _append_timeline_event(task_id, {"step": "publishing", "status": "processing"})
+        await asyncio.sleep(1)
+        await _append_timeline_event(task_id, {"step": "publishing", "status": "success"})
+
+        await _update_task_state(task_id, {"status": "success", "progress_percent": 100})
+        # Mark completion flag for SSE
+        async with _STORE_LOCK:
+            if event_signal := _IN_MEMORY_TASK_STORE[task_id].get("_sse_event"):
+                event_signal.set()
+                
+    except Exception as e:
+        log.exception("Unexpected error in orchestrator: %s", e)
+        await _update_task_state(task_id, {"status": "failed", "error_message": "An unexpected error occurred", "progress_percent": 100})
+        await _append_timeline_event(task_id, {"step": "system", "status": "failed", "error": str(e)})
+        async with _STORE_LOCK:
+            if event_signal := _IN_MEMORY_TASK_STORE[task_id].get("_sse_event"):
+                event_signal.set()
+
+@app.post("/api/v1/tasks")
+async def create_task(request: CreateTaskRequest, background_tasks: BackgroundTasks):
+    task_id = f"tsk_{int(time.time()*1000)}_{os.urandom(4).hex()}"
+    
+    async with _STORE_LOCK:
+        _IN_MEMORY_TASK_STORE[task_id] = {
+            "task_id": task_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "target_url": request.target_url,
+            "status": "queued",
+            "progress_percent": 0,
+            "publish_platforms": request.publish_platforms,
+            "module_type": request.module_type,
+            "source_metadata": {"url": request.target_url, "title": "任务初始化..."},
+            "artifacts": None,
+            "timeline": [],
+            "_sse_event": asyncio.Event() # Internal structure for waking up SSE
+        }
+    
+    background_tasks.add_task(_run_orchestrator, task_id, request.target_url, request.publish_platforms, request.module_type)
+    
+    return {
+        "success": True,
+        "data": {
+            "task_id": task_id,
+            "status": "queued"
+        }
+    }
+
+@app.get("/api/v1/tasks")
+async def get_tasks(module_type: str | None = None):
+    async with _STORE_LOCK:
+        if module_type:
+            filtered = [t for t in _IN_MEMORY_TASK_STORE.values() if t.get("module_type") == module_type]
+        else:
+            filtered = list(_IN_MEMORY_TASK_STORE.values())
+        # Filter out internal keys like _sse_event
+        cleaned = []
+        for task in filtered:
+            public_task = {k: v for k, v in task.items() if not k.startswith("_")}
+            cleaned.append(public_task)
+        sorted_tasks = sorted(cleaned, key=lambda x: x["created_at"], reverse=True)
+    
+    return {"success": True, "data": sorted_tasks}
+
+@app.get("/api/v1/tasks/{task_id}")
+async def get_task(task_id: str):
+    async with _STORE_LOCK:
+        task_data = _IN_MEMORY_TASK_STORE.get(task_id)
+        
+    if not task_data:
+        return {"success": False, "error": {"code": "NOT_FOUND", "message": "任务不存在"}}
+        
+    public_data = {k: v for k, v in task_data.items() if not k.startswith("_")}
+    return {"success": True, "data": public_data}
+
+@app.get("/api/v1/tasks/{task_id}/stream")
+async def task_stream_sse(task_id: str, request: Request):
+    """
+    Server-Sent Events endpoint for real-time task progress.
+    """
+    async with _STORE_LOCK:
+        task_data = _IN_MEMORY_TASK_STORE.get(task_id)
+    if not task_data:
+        return {"success": False, "error": {"code": "NOT_FOUND"}}
+
+    async def event_generator():
+        last_idx = 0
+        while True:
+            if await request.is_disconnected():
+                break
+
+            async with _STORE_LOCK:
+                task_data = _IN_MEMORY_TASK_STORE.get(task_id)
+                current_timeline = task_data.get("timeline", [])
+                current_status = task_data.get("status")
+                progress = task_data.get("progress_percent")
+                event_signal = task_data.get("_sse_event")
+                
+                # Fetch only new timeline events
+                new_events = current_timeline[last_idx:]
+                last_idx = len(current_timeline)
+
+            # Emit new timeline events
+            for ev in new_events:
+                json_data = json.dumps({"type": "timeline", "data": ev})
+                yield f"data: {json_data}\n\n"
+            
+            # Emit broad state update optionally
+            state_data = json.dumps({"type": "state", "status": current_status, "progress": progress})
+            yield f"data: {state_data}\n\n"
+
+            if current_status in ["success", "failed"]:
+                # End of stream
+                yield "event: close\ndata: {}\n\n"
+                break
+
+            # Wait for next event or pulse keep-alive every 2 secs
+            try:
+                await asyncio.wait_for(event_signal.wait(), timeout=2.0)
+                event_signal.clear() # Reset flag after waking up
+            except asyncio.TimeoutError:
+                pass # timeout is fine, keep alive ping
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
