@@ -22,11 +22,34 @@ import logging
 import aiohttp
 from pathlib import Path
 
+class PublisherError(Exception):
+    """Base exception for publishing failures."""
+    pass
+
+class PublisherAuthenticationError(PublisherError):
+    """Raised when authentication tokens are missing or invalid."""
+    pass
+
+class PublisherTokenExpiredError(PublisherAuthenticationError):
+    """Raised specifically when a token is expired and needs refresh."""
+    pass
+
+class PublisherAPIError(PublisherError):
+    """Raised when the platform API returns an error response."""
+    pass
+
 logger = logging.getLogger(__name__)
 
 
 class BasePublisher(ABC):
     """Abstract base class for platform-specific publishers."""
+    
+    # Constants to eliminate magic numbers
+    MAX_TIKTOK_TITLE_LEN = 150
+    MAX_YT_TITLE_LEN = 100
+    MAX_YT_DESC_LEN = 5000
+    MAX_YT_TAGS = 30
+    YT_CATEGORY_ID = "22"
 
     def __init__(self, config: dict):
         self.config = config
@@ -51,6 +74,32 @@ class BasePublisher(ABC):
             raise ValueError(f"Video file is empty: {video_path}")
         return p
 
+    async def _refresh_token_if_needed(self, platform: str) -> str:
+        """
+        Attempts to refresh the OAuth token using a configured callback.
+        Updates the token in self.config and returns it.
+        """
+        refresh_callback = self.config.get(platform, {}).get("refresh_callback")
+        if not refresh_callback:
+            raise PublisherAuthenticationError(f"Token expired and no refresh_callback provided for platform: {platform}")
+        
+        try:
+            import inspect
+            if inspect.iscoroutinefunction(refresh_callback):
+                new_token = await refresh_callback()
+            else:
+                new_token = refresh_callback()
+                
+            if not new_token:
+                raise ValueError("Refresh callback returned empty token")
+                
+            self.config[platform]["access_token"] = new_token
+            logger.info(f"[{platform.capitalize()}] Successfully refreshed OAuth token.")
+            return new_token
+        except Exception as e:
+            logger.error(f"[{platform.capitalize()}] Token refresh failed: {e}")
+            raise PublisherAuthenticationError(f"Failed to refresh {platform} token: {e}") from e
+
 
 # ─── TikTok (Content Posting API v2) ────────────────────────────────────────
 
@@ -62,63 +111,73 @@ class TikTokPublisher(BasePublisher):
     Docs: https://developers.tiktok.com/doc/content-posting-api-get-started
     """
 
-    async def publish(self, video_path: str, metadata: dict) -> dict:
+    async def publish(self, video_path: str, metadata: dict, is_retry: bool = False) -> dict:
         access_token = self.config.get("tiktok", {}).get("access_token")
         if not access_token:
-            return {"status": "skipped", "platform": "TikTok", "error": "No access_token configured"}
+            raise PublisherAuthenticationError("No TikTok access_token configured")
 
-        file = self._validate_file(video_path)
-        logger.info(f"[TikTok] Uploading {file.name} ({file.stat().st_size / 1024 / 1024:.1f} MB)")
+        file_path_obj = self._validate_file(video_path)
+        logger.info(f"[TikTok] Uploading {file_path_obj.name} ({file_path_obj.stat().st_size / 1024 / 1024:.1f} MB)")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Step 1: Initialize upload
-                init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
-                headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                }
-                init_body = {
-                    "post_info": {
-                        "title": metadata.get("title", "")[:150],
-                        "privacy_level": "SELF_ONLY",  # Safe default
-                        "disable_comment": False,
-                    },
-                    "source_info": {
-                        "source": "FILE_UPLOAD",
-                        "video_size": file.stat().st_size,
-                    }
-                }
+        async with aiohttp.ClientSession() as session:
+            try:
+                init_data = await self._init_upload(session, access_token, file_path_obj, metadata)
+            except PublisherTokenExpiredError:
+                if not is_retry:
+                    logger.warning("[TikTok] 401 Unauthorized during init. Attempting token refresh...")
+                    await self._refresh_token_if_needed("tiktok")
+                    return await self.publish(video_path, metadata, is_retry=True)
+                raise PublisherAuthenticationError("TikTok token refresh failed or token still rejected after retry.")
+                
+            upload_url = init_data.get("data", {}).get("upload_url")
+            publish_id = init_data.get("data", {}).get("publish_id")
 
-                async with session.post(init_url, headers=headers, json=init_body) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        return {"status": "failed", "platform": "TikTok", "error": f"Init failed ({resp.status}): {body}"}
-                    init_data = await resp.json()
+            if not upload_url:
+                raise PublisherAPIError("No upload_url in init response")
 
-                upload_url = init_data.get("data", {}).get("upload_url")
-                publish_id = init_data.get("data", {}).get("publish_id")
+            await self._upload_binary(session, upload_url, file_path_obj)
 
-                if not upload_url:
-                    return {"status": "failed", "platform": "TikTok", "error": "No upload_url in init response"}
+            logger.info(f"[TikTok] Upload complete. publish_id={publish_id}")
+            return {"status": "success", "platform": "TikTok", "publish_id": publish_id}
 
-                # Step 2: Upload binary
-                with open(file, "rb") as f:
-                    async with session.put(
-                        upload_url,
-                        data=f,
-                        headers={"Content-Type": "video/mp4"}
-                    ) as upload_resp:
-                        if upload_resp.status not in (200, 201):
-                            body = await upload_resp.text()
-                            return {"status": "failed", "platform": "TikTok", "error": f"Upload failed ({upload_resp.status}): {body}"}
+    async def _init_upload(self, session: aiohttp.ClientSession, access_token: str, file_path_obj: Path, metadata: dict) -> dict:
+        init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        title = metadata.get("title", "")[:self.MAX_TIKTOK_TITLE_LEN]
+        init_body = {
+            "post_info": {
+                "title": title,
+                "privacy_level": "SELF_ONLY",
+                "disable_comment": False,
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_path_obj.stat().st_size,
+            }
+        }
 
-                logger.info(f"[TikTok] Upload complete. publish_id={publish_id}")
-                return {"status": "success", "platform": "TikTok", "publish_id": publish_id}
+        async with session.post(init_url, headers=headers, json=init_body) as resp:
+            if resp.status == 401:
+                raise PublisherTokenExpiredError("TikTok token expired")
+                
+            if resp.status != 200:
+                error_body = await resp.text()
+                raise PublisherAPIError(f"Init failed ({resp.status}): {error_body}")
+            return await resp.json()
 
-        except Exception as e:
-            logger.error(f"[TikTok] Publishing failed: {e}")
-            return {"status": "failed", "platform": "TikTok", "error": str(e)}
+    async def _upload_binary(self, session: aiohttp.ClientSession, upload_url: str, file_path_obj: Path) -> None:
+        with open(file_path_obj, "rb") as f:
+            async with session.put(
+                upload_url,
+                data=f,
+                headers={"Content-Type": "video/mp4"}
+            ) as upload_resp:
+                if upload_resp.status not in (200, 201):
+                    error_body = await upload_resp.text()
+                    raise PublisherAPIError(f"Upload failed ({upload_resp.status}): {error_body}")
 
 
 # ─── YouTube Shorts (YouTube Data API v3) ───────────────────────────────────
@@ -130,70 +189,83 @@ class YouTubeShortsPublisher(BasePublisher):
     Docs: https://developers.google.com/youtube/v3/guides/uploading_a_video
     """
 
-    async def publish(self, video_path: str, metadata: dict) -> dict:
+    async def publish(self, video_path: str, metadata: dict, is_retry: bool = False) -> dict:
         access_token = self.config.get("youtube", {}).get("access_token")
         if not access_token:
-            return {"status": "skipped", "platform": "YouTube Shorts", "error": "No access_token configured"}
+            raise PublisherAuthenticationError("No YouTube access_token configured")
 
-        file = self._validate_file(video_path)
-        logger.info(f"[YouTube] Uploading {file.name} ({file.stat().st_size / 1024 / 1024:.1f} MB)")
+        file_path_obj = self._validate_file(video_path)
+        logger.info(f"[YouTube] Uploading {file_path_obj.name} ({file_path_obj.stat().st_size / 1024 / 1024:.1f} MB)")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Step 1: Initiate resumable upload
-                init_url = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
-                headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json; charset=UTF-8",
-                    "X-Upload-Content-Type": "video/mp4",
-                    "X-Upload-Content-Length": str(file.stat().st_size),
-                }
-                body = {
-                    "snippet": {
-                        "title": metadata.get("title", "AI Video")[:100],
-                        "description": metadata.get("description", "")[:5000],
-                        "tags": metadata.get("tags", [])[:30],
-                        "categoryId": "22",  # People & Blogs
-                    },
-                    "status": {
-                        "privacyStatus": "private",  # Safe default
-                        "selfDeclaredMadeForKids": False,
-                    }
-                }
+        async with aiohttp.ClientSession() as session:
+            try:
+                upload_url = await self._init_upload(session, access_token, file_path_obj, metadata)
+            except PublisherTokenExpiredError:
+                if not is_retry:
+                    logger.warning("[YouTube] 401 Unauthorized during init. Attempting token refresh...")
+                    await self._refresh_token_if_needed("youtube")
+                    return await self.publish(video_path, metadata, is_retry=True)
+                raise PublisherAuthenticationError("YouTube token refresh failed or token still rejected after retry.")
 
-                async with session.post(init_url, headers=headers, json=body) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        return {"status": "failed", "platform": "YouTube Shorts", "error": f"Init failed ({resp.status}): {err}"}
-                    upload_url = resp.headers.get("Location")
+            if not upload_url:
+                raise PublisherAPIError("No Location header in init response")
 
-                if not upload_url:
-                    return {"status": "failed", "platform": "YouTube Shorts", "error": "No Location header in init response"}
+            result = await self._upload_binary(session, upload_url, file_path_obj)
 
-                # Step 2: Upload binary
-                with open(file, "rb") as f:
-                    async with session.put(
-                        upload_url,
-                        data=f,
-                        headers={"Content-Type": "video/mp4"}
-                    ) as upload_resp:
-                        if upload_resp.status not in (200, 201):
-                            err = await upload_resp.text()
-                            return {"status": "failed", "platform": "YouTube Shorts", "error": f"Upload failed ({upload_resp.status}): {err}"}
-                        result = await upload_resp.json()
+            video_id = result.get("id", "unknown")
+            logger.info(f"[YouTube] Upload complete. video_id={video_id}")
+            return {
+                "status": "success",
+                "platform": "YouTube Shorts",
+                "video_id": video_id,
+                "video_url": f"https://youtube.com/shorts/{video_id}",
+            }
 
-                video_id = result.get("id", "unknown")
-                logger.info(f"[YouTube] Upload complete. video_id={video_id}")
-                return {
-                    "status": "success",
-                    "platform": "YouTube Shorts",
-                    "video_id": video_id,
-                    "video_url": f"https://youtube.com/shorts/{video_id}",
-                }
+    async def _init_upload(self, session: aiohttp.ClientSession, access_token: str, file_path_obj: Path, metadata: dict) -> str:
+        init_url = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Length": str(file_path_obj.stat().st_size),
+        }
+        title = metadata.get("title", "AI Video")[:self.MAX_YT_TITLE_LEN]
+        desc = metadata.get("description", "")[:self.MAX_YT_DESC_LEN]
+        tags = metadata.get("tags", [])[:self.MAX_YT_TAGS]
+        
+        body = {
+            "snippet": {
+                "title": title,
+                "description": desc,
+                "tags": tags,
+                "categoryId": self.YT_CATEGORY_ID,
+            },
+            "status": {
+                "privacyStatus": "private",
+                "selfDeclaredMadeForKids": False,
+            }
+        }
 
-        except Exception as e:
-            logger.error(f"[YouTube] Publishing failed: {e}")
-            return {"status": "failed", "platform": "YouTube Shorts", "error": str(e)}
+        async with session.post(init_url, headers=headers, json=body) as resp:
+            if resp.status == 401:
+                raise PublisherTokenExpiredError("YouTube token expired")
+                
+            if resp.status != 200:
+                error_body = await resp.text()
+                raise PublisherAPIError(f"Init failed ({resp.status}): {error_body}")
+            return resp.headers.get("Location", "")
+
+    async def _upload_binary(self, session: aiohttp.ClientSession, upload_url: str, file_path_obj: Path) -> dict:
+        with open(file_path_obj, "rb") as f:
+            async with session.put(
+                upload_url,
+                data=f,
+                headers={"Content-Type": "video/mp4"}
+            ) as upload_resp:
+                if upload_resp.status not in (200, 201):
+                    error_body = await upload_resp.text()
+                    raise PublisherAPIError(f"Upload failed ({upload_resp.status}): {error_body}")
+                return await upload_resp.json()
 
 
 # ─── Douyin (抖音开放平台) ──────────────────────────────────────────────────
@@ -210,50 +282,53 @@ class DouyinPublisher(BasePublisher):
         access_token = self.config.get("douyin", {}).get("access_token")
         open_id = self.config.get("douyin", {}).get("open_id")
         if not access_token or not open_id:
-            return {"status": "skipped", "platform": "Douyin", "error": "No access_token or open_id configured"}
+            raise PublisherAuthenticationError("No Douyin access_token or open_id configured")
 
-        file = self._validate_file(video_path)
-        logger.info(f"[Douyin] Uploading {file.name} ({file.stat().st_size / 1024 / 1024:.1f} MB)")
+        file_path_obj = self._validate_file(video_path)
+        logger.info(f"[Douyin] Uploading {file_path_obj.name} ({file_path_obj.stat().st_size / 1024 / 1024:.1f} MB)")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Step 1: Upload video binary
-                upload_url = "https://open.douyin.com/api/douyin/v1/video/upload_video/"
-                form = aiohttp.FormData()
-                form.add_field("video", open(file, "rb"), filename=file.name, content_type="video/mp4")
+        async with aiohttp.ClientSession() as session:
+            video_id = await self._upload_binary(session, access_token, file_path_obj)
+            await self._create_video(session, access_token, open_id, video_id, metadata)
+            
+            logger.info(f"[Douyin] Upload complete. video_id={video_id}")
+            return {"status": "success", "platform": "Douyin", "video_id": video_id}
 
-                headers = {"access-token": access_token}
+    async def _upload_binary(self, session: aiohttp.ClientSession, access_token: str, file_path_obj: Path) -> str:
+        upload_url = "https://open.douyin.com/api/douyin/v1/video/upload_video/"
+        headers = {"access-token": access_token}
+        
+        with open(file_path_obj, "rb") as f:
+            form = aiohttp.FormData()
+            form.add_field("video", f, filename=file_path_obj.name, content_type="video/mp4")
+            
+            async with session.post(upload_url, data=form, headers=headers) as resp:
+                if resp.status != 200:
+                    error_body = await resp.text()
+                    raise PublisherAPIError(f"Upload failed ({resp.status}): {error_body}")
+                upload_data = await resp.json()
 
-                async with session.post(upload_url, data=form, headers=headers) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        return {"status": "failed", "platform": "Douyin", "error": f"Upload failed ({resp.status}): {err}"}
-                    upload_data = await resp.json()
+        video_id = upload_data.get("data", {}).get("video", {}).get("video_id")
+        if not video_id:
+            raise PublisherAPIError(f"No video_id in upload response: {upload_data}")
+        return video_id
 
-                video_id = upload_data.get("data", {}).get("video", {}).get("video_id")
-                if not video_id:
-                    return {"status": "failed", "platform": "Douyin", "error": f"No video_id in upload response: {upload_data}"}
+    async def _create_video(self, session: aiohttp.ClientSession, access_token: str, open_id: str, video_id: str, metadata: dict) -> None:
+        create_url = "https://open.douyin.com/api/douyin/v1/video/create_video/"
+        headers = {"access-token": access_token}
+        title = metadata.get('title', '')
+        desc = metadata.get('description', '')
+        
+        create_body = {
+            "video_id": video_id,
+            "text": f"{title} {desc}".strip(),
+            "open_id": open_id,
+        }
 
-                # Step 2: Create/publish the video
-                create_url = "https://open.douyin.com/api/douyin/v1/video/create_video/"
-                create_body = {
-                    "video_id": video_id,
-                    "text": f"{metadata.get('title', '')} {metadata.get('description', '')}",
-                    "open_id": open_id,
-                }
-
-                async with session.post(create_url, json=create_body, headers=headers) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        return {"status": "failed", "platform": "Douyin", "error": f"Create failed ({resp.status}): {err}"}
-                    create_data = await resp.json()
-
-                logger.info(f"[Douyin] Upload complete. video_id={video_id}")
-                return {"status": "success", "platform": "Douyin", "video_id": video_id}
-
-        except Exception as e:
-            logger.error(f"[Douyin] Publishing failed: {e}")
-            return {"status": "failed", "platform": "Douyin", "error": str(e)}
+        async with session.post(create_url, json=create_body, headers=headers) as resp:
+            if resp.status != 200:
+                error_body = await resp.text()
+                raise PublisherAPIError(f"Create failed ({resp.status}): {error_body}")
 
 
 # ─── Instagram Reels (Instagram Graph API) ──────────────────────────────────
@@ -270,53 +345,55 @@ class InstagramReelsPublisher(BasePublisher):
         access_token = self.config.get("instagram", {}).get("access_token")
         ig_user_id = self.config.get("instagram", {}).get("ig_user_id")
         if not access_token or not ig_user_id:
-            return {"status": "skipped", "platform": "Instagram Reels", "error": "No access_token or ig_user_id configured"}
+            raise PublisherAuthenticationError("No Instagram access_token or ig_user_id configured")
 
-        # Instagram requires a publicly accessible URL for the video
         video_url = self.config.get("instagram", {}).get("video_host_url")
         if not video_url:
-            return {"status": "skipped", "platform": "Instagram Reels", "error": "Instagram requires a public video URL (video_host_url). Host the video first."}
+            raise PublisherAPIError("Instagram requires a public video URL (video_host_url). Host the video first.")
 
         logger.info(f"[Instagram] Creating Reels container for video: {video_url}")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Step 1: Create media container
-                container_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media"
-                container_params = {
-                    "media_type": "REELS",
-                    "video_url": video_url,
-                    "caption": f"{metadata.get('title', '')} - {metadata.get('description', '')}",
-                    "access_token": access_token,
-                }
+        async with aiohttp.ClientSession() as session:
+            creation_id = await self._create_container(session, access_token, ig_user_id, video_url, metadata)
+            media_id = await self._publish_container(session, access_token, ig_user_id, creation_id)
 
-                async with session.post(container_url, params=container_params) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        return {"status": "failed", "platform": "Instagram Reels", "error": f"Container failed ({resp.status}): {err}"}
-                    container_data = await resp.json()
+            logger.info(f"[Instagram] Reels published. media_id={media_id}")
+            return {"status": "success", "platform": "Instagram Reels", "media_id": media_id}
 
-                creation_id = container_data.get("id")
-                if not creation_id:
-                    return {"status": "failed", "platform": "Instagram Reels", "error": "No creation_id in container response"}
+    async def _create_container(self, session: aiohttp.ClientSession, access_token: str, ig_user_id: str, video_url: str, metadata: dict) -> str:
+        container_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media"
+        title = metadata.get('title', '')
+        desc = metadata.get('description', '')
+        
+        container_params = {
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": f"{title} - {desc}".strip(),
+            "access_token": access_token,
+        }
 
-                # Step 2: Publish
-                publish_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media_publish"
-                publish_params = {
-                    "creation_id": creation_id,
-                    "access_token": access_token,
-                }
+        async with session.post(container_url, params=container_params) as resp:
+            if resp.status != 200:
+                error_body = await resp.text()
+                raise PublisherAPIError(f"Container failed ({resp.status}): {error_body}")
+            container_data = await resp.json()
 
-                async with session.post(publish_url, params=publish_params) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        return {"status": "failed", "platform": "Instagram Reels", "error": f"Publish failed ({resp.status}): {err}"}
-                    publish_data = await resp.json()
+        creation_id = container_data.get("id")
+        if not creation_id:
+            raise PublisherAPIError("No creation_id in container response")
+        return creation_id
 
-                media_id = publish_data.get("id")
-                logger.info(f"[Instagram] Reels published. media_id={media_id}")
-                return {"status": "success", "platform": "Instagram Reels", "media_id": media_id}
+    async def _publish_container(self, session: aiohttp.ClientSession, access_token: str, ig_user_id: str, creation_id: str) -> str:
+        publish_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media_publish"
+        publish_params = {
+            "creation_id": creation_id,
+            "access_token": access_token,
+        }
 
-        except Exception as e:
-            logger.error(f"[Instagram] Publishing failed: {e}")
-            return {"status": "failed", "platform": "Instagram Reels", "error": str(e)}
+        async with session.post(publish_url, params=publish_params) as resp:
+            if resp.status != 200:
+                error_body = await resp.text()
+                raise PublisherAPIError(f"Publish failed ({resp.status}): {error_body}")
+            publish_data = await resp.json()
+
+        return publish_data.get("id")

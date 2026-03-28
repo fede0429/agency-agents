@@ -38,23 +38,21 @@ logger = get_logger(__name__)
 class VideoModelRouter:
     """
     Selects the appropriate video model for each B-roll clip
-    and dispatches the generation call.
-
-    Wraps the existing KieGateway / model adapters behind a uniform interface.
+    and dispatches the generation call via VideoModelRegistry.
     """
 
     def __init__(self, config: dict):
         self.config = config
         self._budget_tiers = {
-            "economy": ["seedance_15", "runway"],
-            "premium": ["veo_31_fast", "seedance_15"],
-            "china":   ["kling_30", "hailuo", "seedance_15"],
+            "economy": ["doubao-seedance-1-5-pro-251215", "runway"],
+            "premium": ["veo-3.1-generate-preview", "doubao-seedance-1-5-pro-251215"],
+            "china":   ["kling-v2-6(PRO)", "viduq3-pro", "doubao-seedance-1-5-pro-251215"],
         }
 
     def select_b_roll_model(self, payload: dict) -> "VideoModelRouter":
         """Return self (acts as model proxy) after recording chosen model."""
         quality_tier = payload.get("metadata", {}).get("quality_tier", "economy")
-        preferred = self._budget_tiers.get(quality_tier, ["seedance_15"])
+        preferred = self._budget_tiers.get(quality_tier, ["doubao-seedance-1-5-pro-251215"])
         # If caller specified a model, honour it
         explicit = payload.get("model")
         self._active_model = explicit if explicit and explicit != "auto" else preferred[0]
@@ -62,7 +60,7 @@ class VideoModelRouter:
 
     @property
     def name(self) -> str:
-        return getattr(self, "_active_model", "seedance_15")
+        return getattr(self, "_active_model", "doubao-seedance-1-5-pro-251215")
 
     async def generate_b_roll(
         self,
@@ -73,25 +71,51 @@ class VideoModelRouter:
         output_path: str,
         metadata: Optional[dict] = None,
     ) -> str:
-        """Generate a single B-roll clip. Returns output_path."""
+        """Generate a single B-roll clip using VideoModelRegistry. Returns output_path."""
         try:
-            from services.kie_gateway import KieGateway
-            gateway = KieGateway(self.config)
+            from services.video_model_registry import VideoModelRegistry, VideoGenerationError
+            import base64
+            import aiohttp
+            
+            registry = VideoModelRegistry(self.config)
 
-            model = getattr(self, "_active_model", "seedance_15")
+            model = getattr(self, "_active_model", "doubao-seedance-1-5-pro-251215")
             duration_int = max(4, min(int(duration_seconds), 15))
 
             logger.info(f"B-roll gen: model={model} dur={duration_int}s shot={shot_type}")
 
-            result = await gateway.generate_video(
+            image_base64 = None
+            if source_image and os.path.exists(source_image):
+                with open(source_image, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode('utf-8')
+                    ext = os.path.splitext(source_image)[1][1:].lower()
+                    if ext == "jpg": ext = "jpeg"
+                    image_base64 = [f"data:image/{ext};base64,{encoded}"]
+
+            result = await registry.generate(
                 model=model,
                 prompt=prompt,
-                image_path=source_image,
                 duration=duration_int,
                 aspect_ratio=(metadata or {}).get("aspect_ratio", "9:16"),
-                output_path=output_path,
+                image_base64=image_base64,
+                audio=False
             )
-            return result.get("video_path", output_path)
+            
+            if not result.success:
+                raise VideoGenerationError(f"Model generation failed: {result.error}")
+            
+            # Download the resulting video url to the output path
+            if result.video_url:
+                logger.info(f"Generating succeeded, downloading {result.video_url} to {output_path}")
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(result.video_url) as resp:
+                        if resp.status != 200:
+                            raise VideoGenerationError(f"Failed to download generated video ({resp.status})")
+                        with open(output_path, "wb") as f:
+                            f.write(await resp.read())
+                return output_path
+            else:
+                raise VideoGenerationError("Registry returned success but no video_url was provided.")
 
         except Exception as e:
             logger.error(f"B-roll generation failed: {e}")

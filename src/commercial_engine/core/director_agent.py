@@ -23,6 +23,18 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# --- Constants to eliminate magic numbers ---
+A_ROLL_RATIO_PRESENTER = 0.42
+A_ROLL_RATIO_NO_PRESENTER = 0.0
+
+DEFAULT_VIDEO_DURATION = 30
+SHORT_VIDEO_DURATION_THRESHOLD = 20
+HOOK_DURATION_SHORT_VIDEO = 4
+HOOK_DURATION_LONG_VIDEO = 5
+CTA_DURATION = 4
+
+DEFAULT_SELLING_POINTS = ["easy to use", "visible result", "daily friendly"]
+
 
 MODEL_COSTS = {
     "seedance_15":    {"per_10s": 0.08,      "label": "Seedance 1.5 Pro"},
@@ -96,6 +108,158 @@ class ProductionPlan:
         }
 
 
+# --- Strategy Pattern for Segment Building ---
+class SegmentBuilderStrategy:
+    """Base strategy for building video segments."""
+    def __init__(self, language: str, persona, product_name: str):
+        self.language = language
+        self.persona = persona
+        self.product_name = product_name
+
+    def build_hook(self, idx: int, duration: int, hook_line: str) -> dict:
+        raise NotImplementedError
+
+    def build_body_beat(self, idx: int, duration: int, beat_name: str, point: str, action: str) -> dict:
+        raise NotImplementedError
+
+    def build_cta(self, idx: int, duration: int, cta_line: str) -> dict:
+        raise NotImplementedError
+
+    def _overlay_from_point(self, point: str) -> str:
+        point = (point or "").strip()
+        if not point:
+            return ""
+        words = point.split()
+        if len(words) <= 5:
+            return point
+        return " ".join(words[:5])
+
+    def _default_hook_overlay(self) -> str:
+        lang = (self.language or "en").lower()
+        if lang == "it": return "Da provare"
+        if lang == "zh": return "真的有感"
+        return "Worth trying"
+
+    def _default_cta_overlay(self) -> str:
+        lang = (self.language or "en").lower()
+        if lang == "it": return "Scoprilo ora"
+        if lang == "zh": return "现在去看看"
+        return "Check it out"
+
+
+class PresenterSegmentBuilder(SegmentBuilderStrategy):
+    """Segment builder when a presenter (A-roll) is available."""
+    def build_hook(self, idx: int, duration: int, hook_line: str) -> dict:
+        shot_type = self.persona.recommended_shot_types[0] if self.persona.recommended_shot_types else "selfie_closeup"
+        return {
+            "id": f"seg_{idx:02d}",
+            "track": "a_roll",
+            "duration": duration,
+            "spoken_line": hook_line,
+            "emotion": "surprised_authentic",
+            "shot_type": shot_type,
+            "overlay_text": self._default_hook_overlay(),
+            "scene_purpose": "hook",
+        }
+
+    def build_body_beat(self, idx: int, duration: int, beat_name: str, point: str, action: str) -> dict:
+        if beat_name in {"problem", "proof"}:
+            spoken = self._localized_spoken_line(beat_name, point)
+            emotion = "warm_casual" if beat_name == "problem" else "confident_expert"
+            shot_index = 0 if beat_name == "problem" else min(1, len(self.persona.recommended_shot_types)-1)
+            shot_type = self.persona.recommended_shot_types[min(len(self.persona.recommended_shot_types)-1, shot_index)] if self.persona.recommended_shot_types else "half_body_talk"
+            return {
+                "id": f"seg_{idx:02d}",
+                "track": "a_roll",
+                "duration": duration,
+                "spoken_line": spoken,
+                "emotion": emotion,
+                "shot_type": shot_type,
+                "overlay_text": self._overlay_from_point(point),
+                "scene_purpose": beat_name,
+            }
+        else:
+            return {
+                "id": f"seg_{idx:02d}",
+                "track": "b_roll",
+                "duration": duration,
+                "visual_goal": beat_name,
+                "product_action": action,
+                "shot_type": action,
+                "overlay_text": self._overlay_from_point(point),
+                "scene_purpose": beat_name,
+            }
+
+    def build_cta(self, idx: int, duration: int, cta_line: str) -> dict:
+        shot_type = self.persona.recommended_shot_types[0] if self.persona.recommended_shot_types else "selfie_closeup"
+        return {
+            "id": f"seg_{idx:02d}",
+            "track": "a_roll",
+            "duration": duration,
+            "spoken_line": cta_line,
+            "emotion": "clear_confident",
+            "shot_type": shot_type,
+            "overlay_text": self._default_cta_overlay(),
+            "scene_purpose": "cta",
+        }
+
+    def _localized_spoken_line(self, beat_name: str, point: str) -> str:
+        lang = (self.language or "en").lower()
+        if lang == "it":
+            if beat_name == "problem": return f"Mi piace perché risolve un problema vero: {point}."
+            if beat_name == "solution": return f"Nell'uso quotidiano, {self.product_name} rende tutto più semplice."
+            if beat_name == "proof": return f"La parte che noto di più è questa: {point}."
+            return f"{self.product_name} si inserisce bene nella routine."
+        if lang == "zh":
+            if beat_name == "problem": return f"我最在意的一点其实就是：{point}。"
+            if beat_name == "solution": return f"真正用起来的时候，它会让整个过程更顺手。"
+            if beat_name == "proof": return f"我觉得最有说服力的，还是这个细节：{point}。"
+            return f"{self.product_name} 很适合日常使用。"
+        if beat_name == "problem": return f"The main thing I care about is {point}."
+        if beat_name == "solution": return f"In real use, {self.product_name} just makes the routine easier."
+        if beat_name == "proof": return f"The detail that really sold me is this: {point}."
+        return f"{self.product_name} fits into daily use really naturally."
+
+
+class BRollSegmentBuilder(SegmentBuilderStrategy):
+    """Segment builder when no presenter is available (pure B-roll)."""
+    def build_hook(self, idx: int, duration: int, hook_line: str) -> dict:
+        return {
+            "id": f"seg_{idx:02d}",
+            "track": "b_roll",
+            "duration": duration,
+            "visual_goal": "product_reveal",
+            "product_action": "unbox",
+            "shot_type": "product_reveal",
+            "overlay_text": self._default_hook_overlay(),
+            "scene_purpose": "hook",
+        }
+
+    def build_body_beat(self, idx: int, duration: int, beat_name: str, point: str, action: str) -> dict:
+        return {
+            "id": f"seg_{idx:02d}",
+            "track": "b_roll",
+            "duration": duration,
+            "visual_goal": beat_name,
+            "product_action": action,
+            "shot_type": action,
+            "overlay_text": self._overlay_from_point(point),
+            "scene_purpose": beat_name,
+        }
+
+    def build_cta(self, idx: int, duration: int, cta_line: str) -> dict:
+        return {
+            "id": f"seg_{idx:02d}",
+            "track": "b_roll",
+            "duration": duration,
+            "visual_goal": "cta_product_hold",
+            "product_action": "result_reveal",
+            "shot_type": "hero_hold",
+            "overlay_text": self._default_cta_overlay(),
+            "scene_purpose": "cta",
+        }
+
+
 class UGCProducer:
     def __init__(self, config: dict):
         self.config = config
@@ -134,14 +298,16 @@ class UGCProducer:
         )
         tier = getattr(request, "quality_tier", "economy")
         model = self._resolve_model(tier, getattr(request, "model", "auto"))
-        duration = int(getattr(request, "duration", 30) or 30)
+        duration = int(getattr(request, "duration", DEFAULT_VIDEO_DURATION) or DEFAULT_VIDEO_DURATION)
         platform = getattr(request, "platform", "douyin")
+        
         selling_points = []
         # pull hints from request/product_summary when available
         if hasattr(request, "text_prompt") and request.text_prompt:
             product_name = request.text_prompt[:60]
         else:
             product_name = "this product"
+            
         if isinstance(product_summary, str):
             product_name = product_summary.split(".")[0][:80] or product_name
             # naive extraction of selling-points fragment
@@ -174,7 +340,7 @@ class UGCProducer:
         best_variant = variants[0]
         best_variant.framework = framework
 
-        a_ratio = 0.42 if has_presenter else 0.0
+        a_ratio = A_ROLL_RATIO_PRESENTER if has_presenter else A_ROLL_RATIO_NO_PRESENTER
         b_ratio = round(1.0 - a_ratio, 2)
         segments = self._build_segments(
             duration=duration,
@@ -182,7 +348,6 @@ class UGCProducer:
             has_presenter=has_presenter,
             persona=persona,
             sales_plan=sales_plan,
-            hook_style=best_variant.hook_style,
             hook_line=best_variant.hook_line,
             product_name=product_name,
             selling_points=selling_points,
@@ -195,6 +360,10 @@ class UGCProducer:
             f"model={model}",
         ]
         cost = self._estimate_cost(model, duration)
+        
+        # Build CTA overlay segment payload using strategy pattern
+        builder = PresenterSegmentBuilder(language, persona, product_name) if has_presenter else BRollSegmentBuilder(language, persona, product_name)
+        
         return ProductionPlan(
             strategy=FRAMEWORK_TO_STRATEGY.get(framework, "testimonial_demo_hybrid"),
             video_model=model,
@@ -211,7 +380,7 @@ class UGCProducer:
             segments_json=segments,
             cta_segment={
                 "spoken_line": sales_plan.cta_line,
-                "overlay_text": self._default_cta_overlay(language),
+                "overlay_text": builder._default_cta_overlay(),
             },
             selected_framework=framework,
             selected_variant_id=best_variant.variant_id,
@@ -234,100 +403,42 @@ class UGCProducer:
         has_presenter: bool,
         persona,
         sales_plan,
-        hook_style: str,
         hook_line: str,
         product_name: str,
         selling_points: list[str],
     ) -> list[dict]:
-        points = selling_points or sales_plan.proof_points or ["easy to use", "visible result", "daily friendly"]
-        hook_duration = 4 if duration <= 20 else 5
-        cta_duration = 4
-        remaining = max(0, duration - hook_duration - cta_duration)
-        mid_segments = []
-        if remaining <= 0:
-            remaining = 0
-        # build 3 middle beats: problem/solution/proof
-        beat_durations = self._split_middle_duration(remaining)
+        """Constructs the timeline segments using the appropriate strategy generator."""
+        points = selling_points or sales_plan.proof_points or DEFAULT_SELLING_POINTS
+        
+        hook_duration = HOOK_DURATION_SHORT_VIDEO if duration <= SHORT_VIDEO_DURATION_THRESHOLD else HOOK_DURATION_LONG_VIDEO
+        remaining_duration = max(0, duration - hook_duration - CTA_DURATION)
+        
+        beat_durations = self._split_middle_duration(remaining_duration)
         beat_templates = [
             ("problem", points[0], "pain_point"),
             ("solution", points[min(1, len(points)-1)], "usage_demo"),
             ("proof", points[min(2, len(points)-1)], "result_reveal"),
         ]
+        
+        builder = PresenterSegmentBuilder(language, persona, product_name) if has_presenter else BRollSegmentBuilder(language, persona, product_name)
+
+        segments = []
         idx = 1
-        if has_presenter:
-            segments = [{
-                "id": f"seg_{idx:02d}",
-                "track": "a_roll",
-                "duration": hook_duration,
-                "spoken_line": hook_line,
-                "emotion": "surprised_authentic",
-                "shot_type": persona.recommended_shot_types[0] if persona.recommended_shot_types else "selfie_closeup",
-                "overlay_text": self._default_hook_overlay(language),
-                "scene_purpose": "hook",
-            }]
-        else:
-            segments = [{
-                "id": f"seg_{idx:02d}",
-                "track": "b_roll",
-                "duration": hook_duration,
-                "visual_goal": "product_reveal",
-                "product_action": "unbox",
-                "shot_type": "product_reveal",
-                "overlay_text": self._default_hook_overlay(language),
-                "scene_purpose": "hook",
-            }]
+        
+        # 1. Hook Segment
+        segments.append(builder.build_hook(idx, hook_duration, hook_line))
         idx += 1
 
+        # 2. Body Segments (Problem, Solution, Proof)
         for beat_duration, (beat_name, point, action) in zip(beat_durations, beat_templates):
             if beat_duration <= 0:
                 continue
-            if has_presenter and beat_name in {"problem", "proof"}:
-                spoken = self._localized_spoken_line(language, beat_name, point, product_name)
-                segments.append({
-                    "id": f"seg_{idx:02d}",
-                    "track": "a_roll",
-                    "duration": beat_duration,
-                    "spoken_line": spoken,
-                    "emotion": "warm_casual" if beat_name == "problem" else "confident_expert",
-                    "shot_type": persona.recommended_shot_types[min(len(persona.recommended_shot_types)-1, 0 if beat_name == "problem" else 1)] if persona.recommended_shot_types else "half_body_talk",
-                    "overlay_text": self._overlay_from_point(point, language),
-                    "scene_purpose": beat_name,
-                })
-            else:
-                segments.append({
-                    "id": f"seg_{idx:02d}",
-                    "track": "b_roll",
-                    "duration": beat_duration,
-                    "visual_goal": beat_name,
-                    "product_action": action,
-                    "shot_type": action,
-                    "overlay_text": self._overlay_from_point(point, language),
-                    "scene_purpose": beat_name,
-                })
+            segments.append(builder.build_body_beat(idx, beat_duration, beat_name, point, action))
             idx += 1
 
-        if has_presenter:
-            segments.append({
-                "id": f"seg_{idx:02d}",
-                "track": "a_roll",
-                "duration": cta_duration,
-                "spoken_line": sales_plan.cta_line,
-                "emotion": "clear_confident",
-                "shot_type": persona.recommended_shot_types[0] if persona.recommended_shot_types else "selfie_closeup",
-                "overlay_text": self._default_cta_overlay(language),
-                "scene_purpose": "cta",
-            })
-        else:
-            segments.append({
-                "id": f"seg_{idx:02d}",
-                "track": "b_roll",
-                "duration": cta_duration,
-                "visual_goal": "cta_product_hold",
-                "product_action": "result_reveal",
-                "shot_type": "hero_hold",
-                "overlay_text": self._default_cta_overlay(language),
-                "scene_purpose": "cta",
-            })
+        # 3. CTA Segment
+        segments.append(builder.build_cta(idx, CTA_DURATION, sales_plan.cta_line))
+
         return segments
 
     def _split_middle_duration(self, remaining: int) -> list[int]:
@@ -362,53 +473,3 @@ class UGCProducer:
             return round(duration_seconds * spec["per_s_1080p"], 4)
         return 0.0
 
-    def _localized_spoken_line(self, language: str, beat_name: str, point: str, product_name: str) -> str:
-        lang = (language or "en").lower()
-        if lang == "it":
-            if beat_name == "problem":
-                return f"Mi piace perché risolve un problema vero: {point}."
-            if beat_name == "solution":
-                return f"Nell'uso quotidiano, {product_name} rende tutto più semplice."
-            if beat_name == "proof":
-                return f"La parte che noto di più è questa: {point}."
-            return f"{product_name} si inserisce bene nella routine."
-        if lang == "zh":
-            if beat_name == "problem":
-                return f"我最在意的一点其实就是：{point}。"
-            if beat_name == "solution":
-                return f"真正用起来的时候，它会让整个过程更顺手。"
-            if beat_name == "proof":
-                return f"我觉得最有说服力的，还是这个细节：{point}。"
-            return f"{product_name} 很适合日常使用。"
-        if beat_name == "problem":
-            return f"The main thing I care about is {point}."
-        if beat_name == "solution":
-            return f"In real use, {product_name} just makes the routine easier."
-        if beat_name == "proof":
-            return f"The detail that really sold me is this: {point}."
-        return f"{product_name} fits into daily use really naturally."
-
-    def _overlay_from_point(self, point: str, language: str) -> str:
-        point = (point or "").strip()
-        if not point:
-            return ""
-        words = point.split()
-        if len(words) <= 5:
-            return point
-        return " ".join(words[:5])
-
-    def _default_hook_overlay(self, language: str) -> str:
-        lang = (language or "en").lower()
-        if lang == "it":
-            return "Da provare"
-        if lang == "zh":
-            return "真的有感"
-        return "Worth trying"
-
-    def _default_cta_overlay(self, language: str) -> str:
-        lang = (language or "en").lower()
-        if lang == "it":
-            return "Scoprilo ora"
-        if lang == "zh":
-            return "现在去看看"
-        return "Check it out"

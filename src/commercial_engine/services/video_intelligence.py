@@ -22,11 +22,35 @@ import asyncio
 import logging
 import tempfile
 import time
+import shutil
+import aiohttp
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+class VideoIntelligenceError(Exception):
+    """Base exception for video intelligence extraction."""
+    pass
+
+class VideoDownloadError(VideoIntelligenceError):
+    """Raised when yt-dlp fails to download the video."""
+    pass
+
+class AudioExtractionError(VideoIntelligenceError):
+    """Raised when ffmpeg fails to extract audio from the video."""
+    pass
+
+class TranscriptionError(VideoIntelligenceError):
+    """Raised when Whisper API fails to transcribe the audio."""
+    pass
+
+class KeyframeExtractionError(VideoIntelligenceError):
+    """Raised when keyframe extraction fails."""
+    pass
 
 
 @dataclass
@@ -85,6 +109,17 @@ class VideoIntelligenceExtractor:
         print(report.transcript)
         print(report.to_prompt_context())
     """
+    DEFAULT_WHISPER_MODEL = "whisper-1"
+    DEFAULT_API_BASE = "https://api.openai.com/v1"
+    MAX_FILESIZE_STR = "200M"
+    YTDLP_TIMEOUT_STR = "30"
+    YTDLP_RETRIES_STR = "3"
+    AUDIO_SAMPLE_RATE_STR = "16000"
+    WHISPER_TIMEOUT_SECS = 120
+    MIN_AUDIO_SIZE_BYTES = 1000
+    KEYFRAME_SCALE_STR = "512:-1"
+    DEFAULT_MAX_AUDIO_SECS = 300
+    DEFAULT_KEYFRAME_COUNT = 5
 
     def __init__(self, config: dict):
         self.config = config
@@ -94,87 +129,78 @@ class VideoIntelligenceExtractor:
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
         # Whisper config
-        self.whisper_model = config.get("video_intelligence", {}).get("whisper_model", "whisper-1")
+        self.whisper_model = config.get("video_intelligence", {}).get("whisper_model", self.DEFAULT_WHISPER_MODEL)
         api_key = config.get("kie", {}).get("api_key") or config.get("openai", {}).get("api_key")
-        base_url = config.get("kie", {}).get("base_url") or config.get("openai", {}).get("base_url", "https://api.openai.com/v1")
+        base_url = config.get("kie", {}).get("base_url") or config.get("openai", {}).get("base_url", self.DEFAULT_API_BASE)
 
         self._api_key = api_key
         self._base_url = base_url
 
         # Max audio duration to transcribe (seconds) — prevent huge API bills
-        self.max_audio_duration = config.get("video_intelligence", {}).get("max_audio_seconds", 300)
+        self.max_audio_duration = config.get("video_intelligence", {}).get("max_audio_seconds", self.DEFAULT_MAX_AUDIO_SECS)
 
         # Keyframe extraction
         self.extract_keyframes = config.get("video_intelligence", {}).get("extract_keyframes", True)
-        self.keyframe_count = config.get("video_intelligence", {}).get("keyframe_count", 5)
+        self.keyframe_count = config.get("video_intelligence", {}).get("keyframe_count", self.DEFAULT_KEYFRAME_COUNT)
 
     async def analyze(self, url: str) -> VideoIntelligenceReport:
         """
         Full pipeline: Download → Extract Audio → Transcribe → Analyze Keyframes.
         Returns a structured VideoIntelligenceReport.
+        Exceptions like VideoDownloadError, AudioExtractionError, TranscriptionError, 
+        and KeyframeExtractionError will be raised upon failure.
         """
         start = time.time()
         report = VideoIntelligenceReport(source_url=url)
 
+        # Step 1: Download Video + Metadata
+        logger.info(f"[VideoIntel] Step 1: Downloading video from {url}")
+        video_path, metadata = await self._download_video(url)
+
+        report.video_local_path = str(video_path)
+        report.platform = self._detect_platform(url)
+        report.original_title = metadata.get("title", "")
+        report.original_description = metadata.get("description", "")
+        report.original_tags = metadata.get("tags", []) or []
+        report.creator = metadata.get("uploader", "") or metadata.get("channel", "")
+        report.view_count = metadata.get("view_count", 0) or 0
+        report.duration_seconds = metadata.get("duration", 0) or 0
+
+        logger.info(f"[VideoIntel] Downloaded: {report.original_title} ({report.duration_seconds:.0f}s)")
+
+        # Step 2: Extract Audio
+        logger.info("[VideoIntel] Step 2: Extracting audio track...")
+        audio_path = await self._extract_audio(video_path)
+
+        # Step 3: Transcribe with Whisper
+        logger.info("[VideoIntel] Step 3: Transcribing with Whisper...")
+        transcript, lang = await self._transcribe_audio(audio_path)
+        report.transcript = transcript
+        report.transcript_language = lang
+        logger.info(f"[VideoIntel] Transcript: {len(transcript)} chars, language={lang}")
+
+        # Clean up audio file
         try:
-            # Step 1: Download Video + Metadata
-            logger.info(f"[VideoIntel] Step 1: Downloading video from {url}")
-            video_path, metadata = await self._download_video(url)
+            os.unlink(audio_path)
+        except OSError as e:
+            logger.warning(f"[VideoIntel] Failed to delete temporary audio file {audio_path}: {e}")
 
-            if not video_path:
-                logger.warning("[VideoIntel] Download failed. Returning empty report.")
-                report.extraction_time_seconds = time.time() - start
-                return report
-
-            report.video_local_path = str(video_path)
-            report.platform = self._detect_platform(url)
-            report.original_title = metadata.get("title", "")
-            report.original_description = metadata.get("description", "")
-            report.original_tags = metadata.get("tags", []) or []
-            report.creator = metadata.get("uploader", "") or metadata.get("channel", "")
-            report.view_count = metadata.get("view_count", 0) or 0
-            report.duration_seconds = metadata.get("duration", 0) or 0
-
-            logger.info(f"[VideoIntel] Downloaded: {report.original_title} ({report.duration_seconds:.0f}s)")
-
-            # Step 2: Extract Audio
-            logger.info("[VideoIntel] Step 2: Extracting audio track...")
-            audio_path = await self._extract_audio(video_path)
-
-            # Step 3: Transcribe with Whisper
-            if audio_path:
-                logger.info("[VideoIntel] Step 3: Transcribing with Whisper...")
-                transcript, lang = await self._transcribe_audio(audio_path)
-                report.transcript = transcript
-                report.transcript_language = lang
-                logger.info(f"[VideoIntel] Transcript: {len(transcript)} chars, language={lang}")
-
-                # Clean up audio file
-                try:
-                    os.unlink(audio_path)
-                except Exception:
-                    pass
-
-            # Step 4: Extract Keyframes (optional)
-            if self.extract_keyframes and video_path:
-                logger.info("[VideoIntel] Step 4: Extracting keyframes...")
-                keyframes = await self._extract_keyframes_from_video(video_path)
-                report.keyframe_descriptions = keyframes
-
-        except Exception as e:
-            logger.error(f"[VideoIntel] Analysis failed: {e}")
+        # Step 4: Extract Keyframes (optional)
+        if self.extract_keyframes and video_path:
+            logger.info("[VideoIntel] Step 4: Extracting keyframes...")
+            keyframes = await self._extract_keyframes_from_video(video_path)
+            report.keyframe_descriptions = keyframes
 
         report.extraction_time_seconds = time.time() - start
         logger.info(f"[VideoIntel] Analysis complete in {report.extraction_time_seconds:.1f}s")
         return report
 
-    async def _download_video(self, url: str) -> tuple[Optional[str], dict]:
+    async def _download_video(self, url: str) -> tuple[str, dict]:
         """
         Download video using yt-dlp. Returns (video_path, metadata_dict).
         yt-dlp supports: TikTok, YouTube, Douyin, Instagram, Bilibili, Twitter/X, etc.
         """
         output_template = str(self.work_dir / f"dl_{int(time.time())}_%(id)s.%(ext)s")
-        info_file = str(self.work_dir / f"info_{int(time.time())}.json")
 
         cmd = [
             "yt-dlp",
@@ -183,24 +209,24 @@ class VideoIntelligenceExtractor:
             "--output", output_template,
             "--write-info-json",
             "--no-write-thumbnail",
-            "--max-filesize", "200M",
-            "--socket-timeout", "30",
-            "--retries", "3",
+            "--max-filesize", self.MAX_FILESIZE_STR,
+            "--socket-timeout", self.YTDLP_TIMEOUT_STR,
+            "--retries", self.YTDLP_RETRIES_STR,
             url
         ]
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            stdout, stderr = await process.communicate()
+            _, stderr = await process.communicate()
 
             if process.returncode != 0:
                 err = stderr.decode("utf-8", errors="ignore")
                 logger.error(f"[VideoIntel] yt-dlp failed: {err[:500]}")
-                return None, {}
+                raise VideoDownloadError(f"yt-dlp failed: {err[:500]}")
 
             # Find the downloaded video file
             video_path = None
@@ -208,34 +234,32 @@ class VideoIntelligenceExtractor:
                 if f.name.startswith("dl_") and f.suffix in (".mp4", ".webm", ".mkv"):
                     video_path = f
                     break
+            
+            if not video_path:
+                raise VideoDownloadError("yt-dlp succeeded but no video file was found in work directory.")
 
             # Find and parse info JSON
             metadata = {}
             for f in self.work_dir.iterdir():
-                if f.suffix == ".json" and "info" in f.name:
+                if f.suffix == ".json" and ("info" in f.name or f.name.endswith(".info.json")):
                     try:
                         with open(f, "r", encoding="utf-8") as jf:
                             metadata = json.load(jf)
-                    except Exception:
-                        pass
-                    # Also check for yt-dlp's auto-generated info json
-                elif f.name.endswith(".info.json"):
-                    try:
-                        with open(f, "r", encoding="utf-8") as jf:
-                            metadata = json.load(jf)
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, OSError) as e:
+                        logger.warning(f"[VideoIntel] Failed to read info json {f}: {e}. Proceeding without metadata.")
 
-            return str(video_path) if video_path else None, metadata
+            return str(video_path), metadata
 
         except FileNotFoundError:
             logger.error("[VideoIntel] yt-dlp not found! Install: pip install yt-dlp")
-            return None, {}
+            raise VideoDownloadError("yt-dlp not found. Please install with `pip install yt-dlp`")
+        except VideoDownloadError:
+            raise
         except Exception as e:
             logger.error(f"[VideoIntel] Download error: {e}")
-            return None, {}
+            raise VideoDownloadError(f"Unexpected error during download: {e}")
 
-    async def _extract_audio(self, video_path: str) -> Optional[str]:
+    async def _extract_audio(self, video_path: str) -> str:
         """Extract audio from video using ffmpeg → WAV (16kHz mono for Whisper)."""
         audio_path = str(Path(video_path).with_suffix(".wav"))
 
@@ -244,7 +268,7 @@ class VideoIntelligenceExtractor:
             "-i", video_path,
             "-vn",                    # No video
             "-acodec", "pcm_s16le",   # 16-bit PCM WAV
-            "-ar", "16000",           # 16kHz sample rate (Whisper optimal)
+            "-ar", self.AUDIO_SAMPLE_RATE_STR, # 16kHz sample rate (Whisper optimal)
             "-ac", "1",               # Mono
             "-t", str(self.max_audio_duration),  # Max duration cap
             audio_path
@@ -253,25 +277,27 @@ class VideoIntelligenceExtractor:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             _, stderr = await process.communicate()
 
             if process.returncode != 0:
                 err = stderr.decode("utf-8", errors="ignore")
                 logger.warning(f"[VideoIntel] Audio extraction failed: {err[:300]}")
-                return None
+                raise AudioExtractionError(f"ffmpeg extraction failed: {err[:300]}")
 
-            if not Path(audio_path).exists() or Path(audio_path).stat().st_size < 1000:
+            if not Path(audio_path).exists() or Path(audio_path).stat().st_size < self.MIN_AUDIO_SIZE_BYTES:
                 logger.warning("[VideoIntel] Audio file too small or empty — video may have no audio")
-                return None
+                raise AudioExtractionError("Extracted audio file empty or missing. Does the video have audio?")
 
             return audio_path
 
+        except AudioExtractionError:
+            raise
         except Exception as e:
             logger.error(f"[VideoIntel] FFmpeg audio extraction error: {e}")
-            return None
+            raise AudioExtractionError(f"Unexpected error during audio extraction: {e}")
 
     async def _transcribe_audio(self, audio_path: str) -> tuple[str, str]:
         """
@@ -280,11 +306,9 @@ class VideoIntelligenceExtractor:
         """
         if not self._api_key:
             logger.warning("[VideoIntel] No API key for Whisper. Skipping transcription.")
-            return "", ""
+            raise TranscriptionError("No API key configured for OpenAI/Whisper.")
 
         try:
-            import aiohttp
-
             url = f"{self._base_url}/audio/transcriptions"
             headers = {"Authorization": f"Bearer {self._api_key}"}
 
@@ -296,11 +320,11 @@ class VideoIntelligenceExtractor:
             form.add_field("response_format", "verbose_json")
 
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=form, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                async with session.post(url, headers=headers, data=form, timeout=aiohttp.ClientTimeout(total=self.WHISPER_TIMEOUT_SECS)) as resp:
                     if resp.status != 200:
                         body = await resp.text()
                         logger.error(f"[VideoIntel] Whisper API failed ({resp.status}): {body[:300]}")
-                        return "", ""
+                        raise TranscriptionError(f"Whisper API error {resp.status}: {body[:300]}")
 
                     result = await resp.json()
 
@@ -309,9 +333,11 @@ class VideoIntelligenceExtractor:
 
             return transcript, language
 
+        except TranscriptionError:
+            raise
         except Exception as e:
             logger.error(f"[VideoIntel] Whisper transcription error: {e}")
-            return "", ""
+            raise TranscriptionError(f"Unexpected error during transcription: {e}")
 
     async def _extract_keyframes_from_video(self, video_path: str) -> list[str]:
         """
@@ -325,7 +351,7 @@ class VideoIntelligenceExtractor:
         cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
-            "-vf", f"select='not(mod(n\\,30))',setpts=N/FRAME_RATE/TB,scale=512:-1",
+            "-vf", f"select='not(mod(n\\,30))',setpts=N/FRAME_RATE/TB,scale={self.KEYFRAME_SCALE_STR}",
             "-frames:v", str(self.keyframe_count),
             "-q:v", "3",
             str(keyframe_dir / "frame_%03d.jpg")
@@ -334,14 +360,18 @@ class VideoIntelligenceExtractor:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            await process.communicate()
+            _, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                err = stderr.decode("utf-8", errors="ignore")
+                raise KeyframeExtractionError(f"ffmpeg keyframe extraction failed: {err[:300]}")
 
             frames = sorted(keyframe_dir.glob("frame_*.jpg"))
             if not frames:
-                return []
+                raise KeyframeExtractionError("ffmpeg succeeded but no keyframe images were produced.")
 
             descriptions = []
             for frame in frames[:self.keyframe_count]:
@@ -350,9 +380,11 @@ class VideoIntelligenceExtractor:
 
             return descriptions
 
+        except KeyframeExtractionError:
+            raise
         except Exception as e:
             logger.warning(f"[VideoIntel] Keyframe extraction failed: {e}")
-            return []
+            raise KeyframeExtractionError(f"Unexpected error during keyframe extraction: {e}")
 
     @staticmethod
     def _detect_platform(url: str) -> str:
@@ -377,8 +409,8 @@ class VideoIntelligenceExtractor:
 
     def cleanup(self):
         """Remove all downloaded files from work directory."""
-        import shutil
-        try:
-            shutil.rmtree(self.work_dir, ignore_errors=True)
-        except Exception:
-            pass
+        if self.work_dir.exists():
+            try:
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+            except OSError as e:
+                logger.warning(f"[VideoIntel] Failed to strictly clean up work directory {self.work_dir}: {e}")

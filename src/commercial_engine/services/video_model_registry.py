@@ -36,6 +36,10 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+class VideoGenerationError(Exception):
+    """Raised when a video generation model fails to generate or download a requested video."""
+    pass
+
 # ─── Model Capability Registry ─────────────────────────────────────────────
 
 @dataclass
