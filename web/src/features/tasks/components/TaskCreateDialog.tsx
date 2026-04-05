@@ -53,13 +53,13 @@ export function TaskCreateDialog({ isOpen, onClose, onSuccess, moduleType }: { i
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-card glass border border-white/10 rounded-2xl w-full max-w-lg shadow-2xl relative overflow-hidden animate-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xl animate-in fade-in duration-300">
+      <div className="glass rounded-2xl w-full max-w-lg shadow-[0_0_50px_rgba(99,102,241,0.15)] relative overflow-hidden animate-in zoom-in-95 duration-300 border border-white/10">
         
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-white/5">
           <h2 className="text-xl font-semibold">
-            {moduleType === 'ugc' ? '新建 UGC带货视频' : moduleType === 'anime' ? '新建 动漫剧集' : '新建 综合短视频'}
+            {moduleType === 'ugc' ? '新建 UGC带货视频' : moduleType === 'anime' ? '新建 动漫剧集' : moduleType === 'narration' ? '新建 AI解说旁白' : '新建 综合短视频'}
           </h2>
           <button onClick={onClose} disabled={status === 'submitting'} className="text-foreground/50 hover:text-foreground transition-colors disabled:opacity-50">
             <X className="w-5 h-5" />

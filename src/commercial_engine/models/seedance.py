@@ -21,9 +21,14 @@ logger = get_logger(__name__)
 
 SEEDANCE_MODELS = {
     "seedance_2": {
-        "api_model": "seedance-1-0-lite-i2v-250428",
-        "api_model_t2v": "seedance-1-0-lite-t2v-250428",
-        "max_seconds": 10,
+        "api_model": "bytedance/seedance-2",
+        "api_model_t2v": "bytedance/seedance-2",
+        "max_seconds": 15,
+    },
+    "seedance_2_fast": {
+        "api_model": "bytedance/seedance-2-fast",
+        "api_model_t2v": "bytedance/seedance-2-fast",
+        "max_seconds": 15,
     },
 }
 

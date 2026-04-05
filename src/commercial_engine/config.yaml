@@ -75,7 +75,7 @@ url_extraction:
   max_length: 8000
   user_agent: Mozilla/5.0 (compatible; UGCVideoPro/2.1)
 defaults:
-  model: veo_31_fast
+  model: seedance_2
   duration: 15
   language: it
   available_models:
@@ -92,8 +92,12 @@ defaults:
     description: ByteDance — strong reference lock
     price: $0.08/10s
   - key: seedance_2
-    name: Seedance 2.0 (Coming Soon)
+    name: Seedance 2.0
     description: ByteDance — animation drama ready
+    price: TBD
+  - key: seedance_2_fast
+    name: Seedance 2.0 Fast
+    description: ByteDance — animation drama ready fast
     price: TBD
   - key: sora_2
     name: Sora 2

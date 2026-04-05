@@ -160,6 +160,53 @@ class FFmpegTools:
         await self._run(cmd)
         return output_path
 
+    async def extract_audio(self, input_video: str, output_path: str) -> str:
+        """Extracts the audio track from a video file into mp3/wav format."""
+        cmd = [
+            self.ffmpeg_bin, "-y", "-i", input_video,
+            "-vn", "-acodec", "libmp3lame", "-q:a", "2", output_path
+        ]
+        await self._run(cmd)
+        return output_path
+
+    async def split_audio_by_time(self, input_audio: str, output_dir: str, segment_time: int = 900) -> list[str]:
+        """
+        Splits a large audio file into smaller chunks without re-encoding to bypass API size limits.
+        Returns a list of created chunk file paths in order.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        base_name = "chunk_%03d.mp3"
+        output_pattern = os.path.join(output_dir, base_name)
+        
+        cmd = [
+            self.ffmpeg_bin, "-y", "-i", input_audio,
+            "-f", "segment", "-segment_time", str(segment_time),
+            "-c", "copy", output_pattern
+        ]
+        await self._run(cmd)
+        
+        # Collect generated chunks
+        chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.startswith("chunk_") and f.endswith(".mp3")])
+        return chunks
+
+    async def ducking_mix_narration(self, input_video: str, narration_audio: str, output_path: str) -> str:
+        """
+        Mixes a narration track over a video, ducking the original video audio.
+        Uses sidechaincompress to automatically lower video audio volume when narration speaks.
+        """
+        filter_complex = (
+            "[1:a]asplit=2[n1][n2];"
+            "[0:a][n1]sidechaincompress=threshold=0.08:ratio=4:attack=200:release=400[ducked];"
+            "[ducked][n2]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        )
+        cmd = [
+            self.ffmpeg_bin, "-y", "-i", input_video, "-i", narration_audio,
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", output_path
+        ]
+        await self._run(cmd)
+        return output_path
+
     async def detect_black_frames(self, input_video: str) -> bool:
         cmd = [self.ffmpeg_bin, "-i", input_video, "-vf",
                "blackdetect=d=0.2:pix_th=0.10", "-an", "-f", "null", "-"]

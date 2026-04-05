@@ -7,7 +7,7 @@ import { Link } from 'react-router-dom';
 import { TaskCreateDialog } from '../features/tasks/components/TaskCreateDialog';
 
 export function TaskListPage() {
-  const [activeTab, setActiveTab] = useState<'ugc' | 'anime' | 'short_video'>('short_video');
+  const [activeTab, setActiveTab] = useState<'ugc' | 'anime' | 'short_video' | 'narration'>('short_video');
   const { state, actions } = useTaskList(activeTab);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
 
@@ -20,26 +20,27 @@ export function TaskListPage() {
         </div>
         <button 
           onClick={() => setIsDialogOpen(true)}
-          className="bg-primary hover:bg-primary-hover text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2 transition-all shadow-lg shadow-primary/20"
+          className="bg-primary hover:bg-primary-hover text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2 transition-all shadow-lg shadow-primary/20 hover:shadow-primary/40 hover:-translate-y-0.5 active:translate-y-0"
         >
           <Plus className="w-5 h-5" />
-          {activeTab === 'ugc' ? '新建带货视频' : activeTab === 'anime' ? '新建动漫剧' : '新建短视频'}
+          {activeTab === 'ugc' ? '新建带货视频' : activeTab === 'anime' ? '新建动漫剧' : activeTab === 'narration' ? '新建旁白视频' : '新建短视频'}
         </button>
       </div>
 
-      <div className="flex gap-2 mb-8 bg-black/20 p-1.5 rounded-xl border border-white/5 w-fit">
+      <div className="flex gap-2 mb-8 glass-panel p-1.5 rounded-xl w-fit overflow-x-auto max-w-full relative z-10">
         {[
           { id: 'ugc', label: '🛒 UGC带货视频' },
           { id: 'anime', label: '🎌 动漫剧集' },
           { id: 'short_video', label: '📱 综合短视频' },
+          { id: 'narration', label: '🎙️ AI解说旁白' },
         ].map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id as any)}
             className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
               activeTab === tab.id 
-                ? 'bg-card border border-white/10 text-white shadow-sm' 
-                : 'text-foreground/50 hover:text-foreground hover:bg-white/5'
+                ? 'bg-primary/20 border border-primary/30 text-primary shadow-inner' 
+                : 'text-foreground/50 hover:text-foreground hover:bg-white/5 border border-transparent'
             }`}
           >
             {tab.label}
@@ -95,13 +96,13 @@ function TaskCard({ task }: { task: TaskListViewModel }) {
   const isFinished = task.status === 'success' || task.status === 'failed';
   
   return (
-    <Link to={`/task/${task.id}`} className="group relative glass rounded-xl overflow-hidden hover:border-primary/50 transition-all block">
-      <div className="h-40 bg-card overflow-hidden relative">
+    <Link to={`/task/${task.id}`} className="group relative glass rounded-xl overflow-hidden hover:border-primary/50 transition-all block hover:-translate-y-1 hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)]">
+      <div className="h-40 bg-black overflow-hidden relative border-b border-white/5">
         {task.thumbnail ? (
-          <img src={task.thumbnail} alt="thumbnail" className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+          <img src={task.thumbnail} alt="thumbnail" className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity duration-300 group-hover:scale-105" />
         ) : (
-          <div className="w-full h-full flex items-center justify-center bg-card-border/50 text-foreground/20">
-            <Video className="w-12 h-12" />
+          <div className="w-full h-full flex items-center justify-center bg-card-border/30 text-foreground/20">
+            <Video className="w-12 h-12 stroke-1" />
           </div>
         )}
         

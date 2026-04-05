@@ -64,7 +64,9 @@ export function useTaskDetail(taskId: string) {
                   assets: '资产解析',
                   segments: '片段划分',
                   shots: '镜头编排',
-                  packaging: '结构封装'
+                  packaging: '结构封装',
+                  download_video: '视频下载',
+                  narration_pipeline: 'AI解说生成'
                 };
 
                 const existingIdx = currentData.timeline.findIndex(t => t.step === newStep.step);

@@ -1,17 +1,34 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #0a0a0a;
-  --color-foreground: #ededed;
-  --color-primary: #3b82f6;
-  --color-primary-hover: #2563eb;
-  --color-card: #171717;
-  --color-card-border: #262626;
+  --color-background: #030014;
+  --color-foreground: #f8fafc;
+  --color-primary: #6366f1;
+  --color-primary-hover: #4f46e5;
+  --color-card: rgba(15, 23, 42, 0.4);
+  --color-card-border: rgba(255, 255, 255, 0.08);
+
+  --animate-pulse-slow: pulse-slow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-shimmer: shimmer 2s linear infinite;
+
+  @keyframes pulse-slow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  @keyframes shimmer {
+    from { background-position: 200% center; }
+    to { background-position: -200% center; }
+  }
 }
 
 @layer base {
   body {
     @apply bg-background text-foreground tracking-wide font-sans;
+    /* Cosmic gradient background artifact */
+    background-image: 
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.15), transparent),
+      radial-gradient(ellipse 80% 50% at 50% 120%, rgba(139, 92, 246, 0.1), transparent);
+    background-attachment: fixed;
     margin: 0;
     min-height: 100vh;
   }
@@ -19,6 +36,10 @@
 
 @layer utilities {
   .glass {
-    @apply bg-black/40 backdrop-blur-md border border-white/10;
+    @apply bg-card backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_0_rgba(0,0,0,0.3)];
+  }
+  .glass-panel {
+    @apply bg-black/40 backdrop-blur-md border border-white/5 shadow-inner;
   }
 }
+

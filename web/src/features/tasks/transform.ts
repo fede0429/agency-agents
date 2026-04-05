@@ -35,7 +35,9 @@ export function transformTaskDetailDto(dto: TaskDetailDTO): TaskDetailViewModel 
     scripting: 'AI文案创作',
     storyboarding: '分镜生成',
     stitching: '视频拼接',
-    publishing: '多端发布'
+    publishing: '多端发布',
+    download_video: '视频下载',
+    narration_pipeline: 'AI解说生成'
   }
 
   const mergedTimeline: any[] = [];
