@@ -7,6 +7,7 @@ on:
     branches:
       - main
       - master
+      - 'feature/**'
   workflow_dispatch: # 允许你手动点击按钮触发编译
 
 jobs:
