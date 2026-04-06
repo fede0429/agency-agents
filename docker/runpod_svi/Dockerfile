@@ -28,3 +28,4 @@ RUN cd /app/svi && pip install setuptools==69.5.1 && pip install -e . --no-build
 COPY handler.py /app/handler.py
 
 CMD ["python", "-u", "/app/handler.py"]
+# trigger action
